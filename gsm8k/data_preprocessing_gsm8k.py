@@ -1,5 +1,6 @@
 import torch
 from torch.nn.utils.rnn import pad_sequence
+import random
 
 # Special tokens used for marking the final answer
 SPECIAL_TOKENS = ["<final-answer>", "</final-answer>"]
@@ -144,6 +145,10 @@ def preprocess_dataset(example, tokenizer, max_len=1024, use_instruction=True, p
     # Debug shape
     if len(input_ids) == 0 or len(labels) == 0:
         print(f"⚠️ Empty sequence for: {example}")
+
+    if random.random() < 0.01:  # Print only some samples to avoid spam
+        print("INPUT IDS:", input_ids)
+        print("LABELS   :", labels)
 
     return {
         "input_ids": input_ids,

@@ -18,6 +18,14 @@ from code.utils.model_saving import SavePeftModelCallback
 from code.utils.args import parse_args
 import wandb
 
+from transformers import TrainerCallback
+from functools import partial
+
+class LossDebugCallback(TrainerCallback):
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs is not None and 'loss' in logs:
+            print(f"[Epoch {state.epoch:.2f}] Loss: {logs['loss']:.6f}")
+
 
 def save_weight_matrix(param, path):
     if hasattr(param, "detach"):
@@ -114,8 +122,6 @@ def load_model(model_id, device="cuda:0", use_lora=False, special_tokens=None):
 
 def main():
     args = parse_args()
-    resume_from_checkpoint = args.resume_from_checkpoint
-
     # 🟣 WandB init
     wandb.login(key="4559d55ae1eb6282f60a6d9a13fbf5c65e9ec215", relogin=True)
     wandb.init(
@@ -146,9 +152,6 @@ def main():
     # print(f"Tokenizer loaded: {tokenizer.name_or_path}")
     # print(f"Special tokens: {tokenizer.special_tokens_map}")
 
-    # 🔘 Collator
-    data_collator = lambda features: custom_data_collator(features, tokenizer)
-
     # 🧮 Tokenize
     tokenized_train = train_dataset.map(
         lambda x: preprocess_dataset(x, tokenizer, max_len=1024, prompt_format="qwen", is_train=True),
@@ -164,7 +167,6 @@ def main():
 
     # 🧪 Training args
     training_args = TrainingArguments(
-        resume_from_checkpoint=resume_from_checkpoint,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         output_dir=args.output_dir,
         per_device_train_batch_size=args.batch_size,
@@ -189,6 +191,8 @@ def main():
     callbacks = []
     if args.save_every_epoch:
         callbacks.append(SavePeftModelCallback(args=args))
+    
+    data_collator = partial(custom_data_collator, tokenizer=tokenizer)
 
     trainer = Trainer(
         model=model,
@@ -197,28 +201,22 @@ def main():
         train_dataset=tokenized_train,
         eval_dataset=tokenized_val,
         data_collator=data_collator,
-        callbacks=callbacks
+        callbacks=[LossDebugCallback()]
     )
 
     trainer.model = model.to("cuda:0")
 
     # Debug one batch
-    # from torch.utils.data import DataLoader
-    # dl = DataLoader(tokenized_train, batch_size=1, collate_fn=lambda x: custom_data_collator(x, tokenizer))
-    # batch = next(iter(dl))
-    # print("input_ids shape:", batch["input_ids"].shape)
-    # print("labels shape:", batch["labels"].shape)
-    # print("input_ids:", batch["input_ids"][0])
-    # print("labels:", batch["labels"][0])
-
     from torch.utils.data import DataLoader
-
-    # Create a small batch to test forward pass
-    dl = DataLoader(tokenized_train, batch_size=1, collate_fn=data_collator)
+    dl = DataLoader(tokenized_train, batch_size=1, collate_fn=lambda x: custom_data_collator(x, tokenizer))
     batch = next(iter(dl))
+    print("INPUT IDS:", batch["input_ids"][0])
+    print("LABELS   :", batch["labels"][0])
+    print("ATTN MASK:", batch["attention_mask"][0])
 
     # Move batch to CUDA
     batch = {k: v.to("cuda:0") for k, v in batch.items()}
+    print("DECODED INPUT:", tokenizer.decode(batch["input_ids"][0], skip_special_tokens=True))
 
     model.eval()
     with torch.no_grad():
@@ -258,7 +256,7 @@ nohup python -m code.gsm8k.finetuning_gsm8k \
   # full finetuning
 nohup python -m code.gsm8k.finetuning_gsm8k \
   --epochs 6 \
-  --batch-size 1 \
+  --batch-size 2 \
   --learning-rate 1e-5 \
   --save-every-epoch \
   --save-npy \
