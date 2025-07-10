@@ -28,5 +28,5 @@ def rename_full_finetune_weights(base_dir):
 
 if __name__ == "__main__":
     # Change this to your actual full weight directory
-    full_weights_dir = "/staging/users/aerol1/tda/Topo-Tuner/numpy_weights/FinEntity/DeepSeek-Qwen-7B/full"
+    full_weights_dir = "/staging/users/aerol1/tda/Topo-Tuner/numpy_weights/FinEntity/DeepSeek-Qwen-7B/full-big"
     rename_full_finetune_weights(full_weights_dir)

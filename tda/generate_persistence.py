@@ -102,7 +102,7 @@ if __name__ == "__main__":
         else:
             process_npy_files_to_persistence(base_path, output_base, file_filter, plot=True)
     else:
-        for epoch in range(1, 51):
+        for epoch in range(1, 101):
             input_folder = os.path.join(base_path, f"epoch_{epoch}")
             output_folder = os.path.join(output_base, f"epoch_{epoch}")
             if not os.path.exists(input_folder):
@@ -145,5 +145,5 @@ nohup python code/tda/generate_persistence.py \
   --dataset FinEntity \
   --model DeepSeek-Qwen-7B \
   --mode lora-final \
-  > logs/persistence_FinEntity_DeepSeek-Qwen-7B_lora-final.log 2>&1 &
+  > logs/persistence_FinEntity_DeepSeek-Qwen-7B_lora-final-100.log 2>&1 &
 """

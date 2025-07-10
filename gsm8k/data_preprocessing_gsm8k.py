@@ -141,6 +141,10 @@ def preprocess_dataset(example, tokenizer, max_len=1024, use_instruction=True, p
     detok_text = tokenizer.decode(input_ids, skip_special_tokens=False)
     # print("🧾 Detokenized Input:\n", detok_text)
 
+    # Debug shape
+    if len(input_ids) == 0 or len(labels) == 0:
+        print(f"⚠️ Empty sequence for: {example}")
+
     return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,

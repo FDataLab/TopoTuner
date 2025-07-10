@@ -104,6 +104,7 @@ def load_model(model_id, device="cuda:0", use_lora=False, special_tokens=None):
         )
         print(f"LoRA config: {lora_config}")
         model = get_peft_model(model, lora_config)
+        model.enable_input_require_grads()  # ✅ VERY IMPORTANT
         model.print_trainable_parameters()
         
     model.gradient_checkpointing_enable()
@@ -181,6 +182,7 @@ def main():
         save_total_limit=1,
         logging_steps=5,
         report_to="wandb",
+        label_names=["labels"],
         logging_dir=logging_dir,
     )
 
@@ -198,6 +200,8 @@ def main():
         callbacks=callbacks
     )
 
+    trainer.model = model.to("cuda:0")
+
     # Debug one batch
     # from torch.utils.data import DataLoader
     # dl = DataLoader(tokenized_train, batch_size=1, collate_fn=lambda x: custom_data_collator(x, tokenizer))
@@ -206,6 +210,28 @@ def main():
     # print("labels shape:", batch["labels"].shape)
     # print("input_ids:", batch["input_ids"][0])
     # print("labels:", batch["labels"][0])
+
+    from torch.utils.data import DataLoader
+
+    # Create a small batch to test forward pass
+    dl = DataLoader(tokenized_train, batch_size=1, collate_fn=data_collator)
+    batch = next(iter(dl))
+
+    # Move batch to CUDA
+    batch = {k: v.to("cuda:0") for k, v in batch.items()}
+
+    model.eval()
+    with torch.no_grad():
+        output = model(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            labels=batch["labels"]
+        )
+        print("=== Forward Pass Debug ===")
+        print("Loss:", output.loss)
+        print("Logits:", output.logits.shape)
+        print("Grad fn:", output.loss.grad_fn if output.loss is not None else None)
+
 
     trainer.train()
 
@@ -220,13 +246,14 @@ if __name__ == "__main__":
   # lora finetuning
 nohup python -m code.gsm8k.finetuning_gsm8k \
   --use-lora \
-  --epochs 1 \
-  --batch-size 1 \
+  --epochs 6 \
+  --batch-size 4 \
   --learning-rate 1e-5 \
   --dataset-name GSM8K \
   --model-name DeepSeek-Qwen-7B \
   --save-every-epoch \
-  > /staging/users/aerol1/tda/Topo-Tuner/logs/finetune_GSM8K_DeepSeek-Qwen-7B_lora.log 2>&1 &
+  --save-npy \
+  > logs/finetune_GSM8K_DeepSeek-Qwen-7B_lora.log 2>&1 &
 
   # full finetuning
 nohup python -m code.gsm8k.finetuning_gsm8k \
