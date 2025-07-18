@@ -35,16 +35,6 @@ Output (Keywords):
 ]
 """
 
-def print_existing_special_tokens(tokenizer):
-    print(f"\n🔍 Printing existing special tokens from tokenizer '{tokenizer.name_or_path}'\n")
-    
-    # Loop over vocab to find special-looking tokens
-    for token, token_id in tokenizer.get_vocab().items():
-        # Print only special-looking tokens (you can refine this if needed)
-        if token.startswith("<|") and token.endswith("|>"):
-            print(f"{token_id}: AddedToken({repr(token)}, "
-                  f"rstrip=False, lstrip=False, single_word=False, "
-                  f"normalized=False, special=True)")
 
 def build_prompt(prompt: str, instruction_ids: list, prompt_format: str, use_instruction: bool = True) -> str:
     base_prompt = (
@@ -59,7 +49,7 @@ def build_prompt(prompt: str, instruction_ids: list, prompt_format: str, use_ins
             return f"<s>[INST] {base_prompt} [/INST]"
     else:  # Qwen-style
         if use_instruction:
-            return f"<｜begin_of_sentence｜><｜User｜>{DEFAULT_SYSTEM_PROMPT}\n{base_prompt}<｜end_of_sentence｜><｜Assistant｜>"
+            return f"<｜begin_of_sentence｜><｜User｜>{DEFAULT_SYSTEM_PROMPT}\n{base_prompt}<｜end_of_sentence｜>"
         else:
             return base_prompt
 
@@ -70,13 +60,7 @@ def build_answer(kwargs: list) -> str:
         formatted_constraints.append(f"  - Constraint {i+1}: {{ {', '.join(parts)} }}")
     return "\n".join(formatted_constraints)
 
-def preprocess_ifeval(
-    example: Dict,
-    tokenizer: PreTrainedTokenizer,
-    max_len: int = 1024,
-    prompt_format: str = "qwen",
-    use_instruction: bool = True,
-) -> Dict:
+def preprocess_ifeval(example, tokenizer, max_len = 1024, use_instruction = True, prompt_format = "qwen", is_train = True):
     prompt_text = build_prompt(
         example["prompt"],
         example["instruction_id_list"],
@@ -85,8 +69,8 @@ def preprocess_ifeval(
     )
     answer_text = build_answer(example["kwargs"])
 
-    prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
-    answer_ids = tokenizer(answer_text, add_special_tokens=False)["input_ids"]
+    prompt_ids = tokenizer(prompt_text)["input_ids"]
+    answer_ids = tokenizer(answer_text)["input_ids"]
 
     input_ids = prompt_ids + answer_ids
     labels = [-100] * len(prompt_ids) + answer_ids
