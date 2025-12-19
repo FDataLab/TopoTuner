@@ -30,6 +30,11 @@ def parse_args():
     parser.add_argument("--freeze-q-layers", nargs="*", type=int, default=[], help="Freeze ONLY q_proj in these layer idxs")
     parser.add_argument("--freeze-k-layers", nargs="*", type=int, default=[], help="Freeze ONLY k_proj in these layer idxs")
     parser.add_argument("--freeze-v-layers", nargs="*", type=int, default=[], help="Freeze ONLY v_proj in these layer idxs")
+    parser.add_argument(
+        "--freeze-qkv-no-grad",
+        action="store_true",
+        help="Detach outputs for frozen q/k/v projections to skip backward for those ops (saves time, stops grad to earlier layers)"
+    )
 
     parser.add_argument(
         "--hotpot-evidence",

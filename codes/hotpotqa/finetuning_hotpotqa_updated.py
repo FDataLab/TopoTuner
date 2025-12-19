@@ -300,11 +300,43 @@ def debug_print_samples_after_training(model, tok, raw_ds, tokenized_ds, output_
 # =========================================================
 # Model / Tokenizer
 # =========================================================
-def load_model_and_tokenizer(model_id: str, use_lora: bool, freeze_layers=None, freeze_q_layers=None, freeze_k_layers=None, freeze_v_layers=None):
+def load_model_and_tokenizer(
+    model_id: str,
+    use_lora: bool,
+    freeze_layers=None,
+    freeze_q_layers=None,
+    freeze_k_layers=None,
+    freeze_v_layers=None,
+    freeze_qkv_no_grad: bool = False,
+):
     freeze_layers = freeze_layers or []
     freeze_q_layers = freeze_q_layers or []
     freeze_k_layers = freeze_k_layers or []
     freeze_v_layers = freeze_v_layers or []
+
+    def _wrap_no_grad(module, label):
+        original_forward = module.forward
+
+        def forward_no_grad(*args, **kwargs):
+            with torch.no_grad():
+                return original_forward(*args, **kwargs)
+
+        module.forward = forward_no_grad
+        print(f"   → {label} forward wrapped with no_grad()", flush=True)
+
+    def _apply_no_grad_wrappers(transformer_layers, qset, kset, vset):
+        for idx, layer in enumerate(transformer_layers):
+            if idx not in (qset | kset | vset):
+                continue
+            attn = getattr(layer, "self_attn", None) or getattr(layer, "attn", None)
+            if attn is None:
+                continue
+            if idx in qset and hasattr(attn, "q_proj"):
+                _wrap_no_grad(attn.q_proj, f"Layer {idx} q_proj")
+            if idx in kset and hasattr(attn, "k_proj"):
+                _wrap_no_grad(attn.k_proj, f"Layer {idx} k_proj")
+            if idx in vset and hasattr(attn, "v_proj"):
+                _wrap_no_grad(attn.v_proj, f"Layer {idx} v_proj")
 
     tok = AutoTokenizer.from_pretrained(
         model_id,
@@ -419,6 +451,16 @@ def load_model_and_tokenizer(model_id: str, use_lora: bool, freeze_layers=None, 
 
 
         model.print_trainable_parameters()
+
+    if freeze_qkv_no_grad and (freeze_q_layers or freeze_k_layers or freeze_v_layers):
+        qset, kset, vset = set(freeze_q_layers), set(freeze_k_layers), set(freeze_v_layers)
+        print("⚠️  freeze_qkv_no_grad enabled: detaching q/k/v outputs to skip backward for those ops.", flush=True)
+        if "transformer_layers" not in locals():
+            try:
+                transformer_layers = model.transformer.layers
+            except AttributeError:
+                transformer_layers = model.model.layers
+        _apply_no_grad_wrappers(transformer_layers, qset, kset, vset)
 
     model.gradient_checkpointing_enable()
     return model, tok
@@ -552,6 +594,7 @@ def main():
         freeze_q_layers=getattr(args, "freeze_q_layers", []),
         freeze_k_layers=getattr(args, "freeze_k_layers", []),
         freeze_v_layers=getattr(args, "freeze_v_layers", []),
+        freeze_qkv_no_grad=getattr(args, "freeze_qkv_no_grad", False),
     )
 
     # Prompt format and evidence mode
