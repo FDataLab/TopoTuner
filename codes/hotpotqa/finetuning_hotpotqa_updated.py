@@ -561,7 +561,7 @@ def main():
     tokenized_train = train_ds.map(
         lambda ex: preprocess_dataset(
             ex, tok,
-            max_len=1024,
+            max_len=2048,
             prompt_format=pf,
             is_train=True,
             evidence_mode=evidence_mode,
@@ -572,7 +572,7 @@ def main():
     tokenized_val = dev_ds.map(
         lambda ex: preprocess_dataset(
             ex, tok,
-            max_len=1024,
+            max_len=2048,
             prompt_format=pf,
             is_train=False,
             evidence_mode=evidence_mode,
