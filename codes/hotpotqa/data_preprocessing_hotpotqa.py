@@ -14,18 +14,31 @@ Rules:
   Answer: [SHORT_ANSWER]
 """
 
+# ===== PROFESSOR'S VERSION (ACTIVE) =====
 # SIMPLIFIED FORMAT (easier for model to learn):
 DEFAULT_SYSTEM_PROMPT = """You are a knowledgeable assistant answering multi-hop questions.
-
 Guidelines:
 - Combine information from multiple pieces of evidence.
 - Reason internally and concisely.
 - Use only the provided evidence; do not rely on outside knowledge.
 - Provide only the final answer in the required format.
-
 Output format:
 Answer: [SHORT_ANSWER]
 """
+
+# ===== KADIR'S VERSION (COMMENTED OUT - PRESERVED FOR REFERENCE) =====
+# # SIMPLIFIED FORMAT (easier for model to learn):
+# DEFAULT_SYSTEM_PROMPT = """You are a knowledgeable assistant answering multi-hop questions.
+# 
+# Guidelines:
+# - Combine information from multiple pieces of evidence.
+# - Reason internally and concisely.
+# - Use only the provided evidence; do not rely on outside knowledge.
+# - Provide only the final answer in the required format.
+# 
+# Output format:
+# Answer: [SHORT_ANSWER]
+# """
 
 # ----------------- Prompt builders -----------------
 
@@ -179,7 +192,10 @@ def eos_for_model(tokenizer, model_id: str):
 def preprocess_dataset(
     example,
     tokenizer,
-    max_len: int = 2048,
+    # ===== PROFESSOR'S VERSION (ACTIVE) =====
+    max_len: int = 1024,
+    # ===== KADIR'S VERSION (COMMENTED OUT - PRESERVED FOR REFERENCE) =====
+    # max_len: int = 2048,
     use_instruction: bool = True,
     prompt_format: str = "llama3",
     is_train: bool = True,

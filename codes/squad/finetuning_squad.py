@@ -106,8 +106,85 @@ class EMF1PerEpochCallback(TrainerCallback):
                     writer.writeheader()
                 writer.writerow(record)
 
-def load_model_and_tokenizer(model_id: str, use_lora: bool):
-    tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True, padding_side="right", token=HF_TOKEN)
+def load_model_and_tokenizer(
+    model_id: str,
+    use_lora: bool,
+    freeze_layers=None,
+    freeze_q_layers=None,
+    freeze_k_layers=None,
+    freeze_v_layers=None,
+    freeze_qkv_no_grad: bool = False,
+    freeze_o_with_qkv: bool = False,
+    freeze_mlp: bool = False,
+    freeze_mlp_no_grad: bool = False,
+    freeze_mlp_layers=None,
+):
+    freeze_layers = freeze_layers or []
+    freeze_q_layers = freeze_q_layers or []
+    freeze_k_layers = freeze_k_layers or []
+    freeze_v_layers = freeze_v_layers or []
+    freeze_mlp_layers = freeze_mlp_layers or []
+
+    def _wrap_no_grad(module, label):
+        original_forward = module.forward
+
+        def forward_no_grad(*args, **kwargs):
+            with torch.no_grad():
+                return original_forward(*args, **kwargs)
+
+        module.forward = forward_no_grad
+        print(f"   → {label} forward wrapped with no_grad()", flush=True)
+
+    def _apply_no_grad_wrappers(
+        transformer_layers,
+        q_layers=None,
+        k_layers=None,
+        v_layers=None,
+        mlp_layers=None,
+        also_o_proj: bool = False,
+    ):
+        """
+        Wrap selected submodules (Q/K/V/O and MLP) with no_grad() in their forward pass.
+        This is the extended professor-style helper, supporting both attention heads
+        and MLP blocks for LLaMA/Qwen-style architectures.
+        """
+        q_layers = q_layers or set()
+        k_layers = k_layers or set()
+        v_layers = v_layers or set()
+        mlp_layers = mlp_layers or set()
+
+        for idx, layer in enumerate(transformer_layers):
+            # -------- Attention block (Q/K/V/O) --------
+            if idx in (q_layers | k_layers | v_layers):
+                attn = getattr(layer, "self_attn", None) or getattr(layer, "attn", None)
+                if attn is not None:
+                    if idx in q_layers and hasattr(attn, "q_proj"):
+                        _wrap_no_grad(attn.q_proj, f"Layer {idx} q_proj")
+                    if idx in k_layers and hasattr(attn, "k_proj"):
+                        _wrap_no_grad(attn.k_proj, f"Layer {idx} k_proj")
+                    if idx in v_layers and hasattr(attn, "v_proj"):
+                        _wrap_no_grad(attn.v_proj, f"Layer {idx} v_proj")
+                    # Optionally also wrap o_proj (K+O, Q+O, V+O experiments)
+                    if also_o_proj and hasattr(attn, "o_proj"):
+                        _wrap_no_grad(attn.o_proj, f"Layer {idx} o_proj")
+
+            # -------- MLP block (gate/up/down) --------
+            if idx in mlp_layers:
+                mlp = getattr(layer, "mlp", None)
+                if mlp is not None:
+                    if hasattr(mlp, "gate_proj"):
+                        _wrap_no_grad(mlp.gate_proj, f"Layer {idx} mlp.gate_proj")
+                    if hasattr(mlp, "up_proj"):
+                        _wrap_no_grad(mlp.up_proj, f"Layer {idx} mlp.up_proj")
+                    if hasattr(mlp, "down_proj"):
+                        _wrap_no_grad(mlp.down_proj, f"Layer {idx} mlp.down_proj")
+
+    tok = AutoTokenizer.from_pretrained(
+        model_id,
+        trust_remote_code=True,
+        padding_side="right",
+        token=HF_TOKEN
+    )
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
         tok.pad_token_id = tok.eos_token_id
@@ -115,7 +192,7 @@ def load_model_and_tokenizer(model_id: str, use_lora: bool):
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         device_map={"": 0},
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,   # torch_dtype deprecated -> dtype
         trust_remote_code=True,
         token=HF_TOKEN
     )
@@ -124,7 +201,68 @@ def load_model_and_tokenizer(model_id: str, use_lora: bool):
         model.config.pad_token_id = tok.pad_token_id
     model.config.use_cache = False
 
+    # Freeze base transformer layers
+    if freeze_layers:
+        print(f"🔥 Freezing Transformer layers: {freeze_layers}", flush=True)
+
+        try:
+            transformer_layers = model.transformer.layers  # Qwen-like
+        except AttributeError:
+            transformer_layers = model.model.layers        # LLaMA-like
+
+        for idx, layer in enumerate(transformer_layers):
+            if idx in freeze_layers:
+                for p in layer.parameters():
+                    p.requires_grad = False
+                print(f"   → Base layer {idx} frozen (epoch-0 behavior preserved)", flush=True)
+    
+    # ===== PROFESSOR'S VERSION (ACTIVE) =====
+    # --------------------------
+    # Freeze ONLY q/k/v projections in selected layers (base weights)
+    # Works for LLaMA-family naming (q_proj/k_proj/v_proj).
+    # Professor's simpler strategy (default): only freezes Q/K/V, not o_proj or MLP
+    # Optionally also freeze o_proj in those layers when freeze_o_with_qkv=True
+    # (enables K+O, Q+O, V+O experiments)
+    # Optionally also freeze MLP (gate_proj, up_proj, down_proj) when freeze_mlp=True
+    # (enables K+O+MLP, Q+O+MLP, V+O+MLP experiments)
+    # --------------------------
+    if freeze_q_layers or freeze_k_layers or freeze_v_layers:
+        qset, kset, vset = set(freeze_q_layers), set(freeze_k_layers), set(freeze_v_layers)
+        print(f"🧊 Freezing projections: Q={sorted(qset)} K={sorted(kset)} V={sorted(vset)}", flush=True)
+        if freeze_o_with_qkv:
+            print("   ➕ Also freezing o_proj in any layer present in Q/K/V sets (K+O, Q+O, V+O enabled)", flush=True)
+        if freeze_mlp:
+            print("   ➕ Also freezing MLP (gate_proj, up_proj, down_proj) in any layer present in Q/K/V sets (K+O+MLP, Q+O+MLP, V+O+MLP enabled)", flush=True)
+
+        for name, p in model.named_parameters():
+            # Match layer index in parameter name (common patterns: ".layers.{i}.")
+            hit_layer = None
+            for i in (qset | kset | vset):
+                if f".layers.{i}." in name:
+                    hit_layer = i
+                    break
+            if hit_layer is None:
+                continue
+
+            # Freeze selectively by projection
+            if hit_layer in qset and ".q_proj." in name:
+                p.requires_grad = False
+            if hit_layer in kset and ".k_proj." in name:
+                p.requires_grad = False
+            if hit_layer in vset and ".v_proj." in name:
+                p.requires_grad = False
+            # Optionally also freeze o_proj in those layers
+            if freeze_o_with_qkv and ".o_proj." in name and hit_layer in (qset | kset | vset):
+                p.requires_grad = False
+            # Optionally also freeze MLP in those layers (K+O+MLP, Q+O+MLP, V+O+MLP experiments)
+            if freeze_mlp and hit_layer in (qset | kset | vset):
+                if ".gate_proj." in name or ".up_proj." in name or ".down_proj." in name:
+                    p.requires_grad = False
+
+    # LoRA inject q/k/v and disable LoRA params in frozen layers
     if use_lora:
+        print("⚙️  Applying LoRA: q/k/v only (disable LoRA in frozen layers)", flush=True)
+
         lcfg = LoraConfig(
             r=8,
             lora_alpha=16,
@@ -134,7 +272,75 @@ def load_model_and_tokenizer(model_id: str, use_lora: bool):
             task_type=TaskType.CAUSAL_LM,
         )
         model = get_peft_model(model, lcfg)
+
+        if freeze_layers:
+            for name, p in model.named_parameters():
+                if "lora_" not in name:
+                    continue
+                for layer_idx in freeze_layers:
+                    if f".layers.{layer_idx}." in name:
+                        p.requires_grad = False
+                        break
+        # Also disable LoRA params for q/k/v projections in specified layers
+        if freeze_q_layers or freeze_k_layers or freeze_v_layers:
+            qset, kset, vset = set(freeze_q_layers), set(freeze_k_layers), set(freeze_v_layers)
+
+            for name, p in model.named_parameters():
+                if "lora_" not in name:
+                    continue
+
+                # Find layer idx match
+                layer_hit = None
+                for i in (qset | kset | vset):
+                    if f".layers.{i}." in name:
+                        layer_hit = i
+                        break
+                if layer_hit is None:
+                    continue
+
+                # Freeze LoRA for the specific projection in that layer
+                if layer_hit in qset and "q_proj" in name:
+                    p.requires_grad = False
+                if layer_hit in kset and "k_proj" in name:
+                    p.requires_grad = False
+                if layer_hit in vset and "v_proj" in name:
+                    p.requires_grad = False
+
         model.print_trainable_parameters()
+
+    # ===== PROFESSOR'S VERSION (EXTENDED) =====
+    if (
+        freeze_qkv_no_grad and (freeze_q_layers or freeze_k_layers or freeze_v_layers)
+    ) or (
+        freeze_mlp_no_grad and freeze_mlp_layers
+    ):
+        qset = set(freeze_q_layers or [])
+        kset = set(freeze_k_layers or [])
+        vset = set(freeze_v_layers or [])
+        mlpset = set(freeze_mlp_layers or [])
+
+        print("⚠️  no_grad wrappers enabled:", flush=True)
+        if qset or kset or vset:
+            print(f"   • QKV layers: {sorted(qset | kset | vset)}", flush=True)
+            if freeze_o_with_qkv:
+                print("   • o_proj also wrapped with no_grad in those layers", flush=True)
+        if mlpset:
+            print(f"   • MLP layers: {sorted(mlpset)}", flush=True)
+
+        if "transformer_layers" not in locals():
+            try:
+                transformer_layers = model.transformer.layers  # Qwen-like
+            except AttributeError:
+                transformer_layers = model.model.layers        # LLaMA-like
+
+        _apply_no_grad_wrappers(
+            transformer_layers,
+            q_layers=qset,
+            k_layers=kset,
+            v_layers=vset,
+            mlp_layers=mlpset,
+            also_o_proj=freeze_o_with_qkv,
+        )
 
     model.gradient_checkpointing_enable()
     return model, tok
@@ -172,7 +378,19 @@ def main():
     train_ds, dev_ds = split["train"], split["test"]
     print(f"Train {len(train_ds)} | Dev {len(dev_ds)} | Val {len(val_ds)}")
 
-    model, tok = load_model_and_tokenizer(args.model_name, args.use_lora)
+    model, tok = load_model_and_tokenizer(
+        args.model_name,
+        args.use_lora,
+        freeze_layers=args.freeze_layers,
+        freeze_q_layers=getattr(args, "freeze_q_layers", []),
+        freeze_k_layers=getattr(args, "freeze_k_layers", []),
+        freeze_v_layers=getattr(args, "freeze_v_layers", []),
+        freeze_qkv_no_grad=getattr(args, "freeze_qkv_no_grad", False),
+        freeze_o_with_qkv=getattr(args, "freeze_o_with_qkv", False),
+        freeze_mlp=getattr(args, "freeze_mlp", False),
+        freeze_mlp_no_grad=getattr(args, "freeze_mlp_no_grad", False),
+        freeze_mlp_layers=getattr(args, "freeze_mlp_layers", []),
+    )
     pf = infer_prompt_format_from_model_id(args.model_name)
 
     tokenized_train = train_ds.map(
