@@ -46,11 +46,72 @@ def _em_and_f1(prediction: str, ground_truth: str) -> Tuple[float, float]:
     return em, f1
 
 def _extract_final_answer(text: str) -> str:
-    text = text.split("<|end_of_text|>")[0]
-    if "Answer:" in text:
-        _, tail = text.rsplit("Answer:", maxsplit=1)
-        return tail.strip().splitlines()[0].strip()
-    return text.strip()
+    """
+    Robust answer extractor for SQuAD.
+    Handles various formats: "Answer: X", lists like "1. X", direct answers, etc.
+    """
+    if text is None:
+        return ""
+    
+    text = str(text).strip()
+    if not text:
+        return ""
+    
+    # Remove end-of-text markers
+    text = text.split("<|end_of_text|>")[0].strip()
+    if not text:
+        return ""
+    
+    # Try to find "Answer:" first (preferred format)
+    answer_markers = ["Answer:", "answer:"]
+    for marker in answer_markers:
+        if marker in text:
+            # Find the last occurrence (in case of repetition)
+            parts = text.rsplit(marker, maxsplit=1)
+            if len(parts) > 1:
+                answer_text = parts[1].strip()
+                # Take first line and clean it
+                first_line = answer_text.split('\n')[0].strip()
+                # Remove brackets if present (e.g., "[Santa Clara, California]" -> "Santa Clara, California")
+                first_line = first_line.strip('[]').strip()
+                if first_line:
+                    return first_line
+    
+    # Fallback: Try to extract from numbered lists (e.g., "1. Denver Broncos")
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for line in lines[:5]:  # Check first 5 lines
+        # Match patterns like "1. Answer", "1) Answer", "- Answer"
+        match = re.match(r'^\d+[\.\)]\s*(.+)$', line)
+        if match:
+            answer = match.group(1).strip()
+            # Clean up common suffixes
+            answer = re.sub(r'\s*\(.*?\)\s*$', '', answer)  # Remove trailing parentheses
+            answer = answer.strip('[]').strip()
+            if answer and len(answer.split()) <= 10:  # Reasonable answer length
+                return answer
+    
+    # Fallback: Try to extract first meaningful line
+    for line in lines[:3]:
+        line = line.strip()
+        # Skip obvious junk
+        if any(skip in line.lower() for skip in [
+            "question:", "context:", "user:", "assistant:", "system:",
+            "step", "reasoning", "explanation", "based on", "from the"
+        ]):
+            continue
+        # Skip if too long (likely not an answer)
+        if len(line.split()) > 15:
+            continue
+        # Clean up
+        line = line.strip('[]').strip()
+        if line:
+            return line
+    
+    # Last resort: return first non-empty line (cleaned)
+    if lines:
+        return lines[0].strip('[]').strip()
+    
+    return ""
 
 def _append_jsonl(path: str, obj: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -135,6 +196,7 @@ def evaluate_squad(
             do_sample=False,
             eos_token_id=eos_id,
             pad_token_id=tokenizer.pad_token_id,
+            repetition_penalty=1.3,  # Match HotpotQA setting to reduce repetition
         )
 
         prompt_len = inputs["input_ids"].shape[1]

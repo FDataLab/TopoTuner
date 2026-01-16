@@ -3,8 +3,10 @@ import os
 import glob
 import shutil
 import datetime
+import time
 import torch
 from functools import partial
+from contextlib import contextmanager
 from datasets import load_dataset
 from transformers import (
     AutoTokenizer,
@@ -32,6 +34,92 @@ import wandb
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 HF_TOKEN = os.environ.get("HUGGINGFACE_HUB_TOKEN")
+
+# =========================================================
+# Timing Tracker
+# =========================================================
+class TimingTracker:
+    """Lightweight timing tracker with minimal overhead."""
+    def __init__(self, enabled: bool = True):
+        self.enabled = enabled
+        self.timings = {}
+        self.overhead_samples = []
+        self._overhead_measured = False
+        self._timing_overhead_total = 0.0
+    
+    def _measure_overhead(self, n_samples=1000):
+        """Measure timing overhead once."""
+        if self._overhead_measured:
+            return
+        overhead_times = []
+        for _ in range(n_samples):
+            start = time.perf_counter()
+            end = time.perf_counter()
+            overhead_times.append(end - start)
+        self.overhead_samples = overhead_times
+        avg_overhead = sum(overhead_times) / len(overhead_times)
+        self._overhead_measured = True
+        print(f"   ⏱️  Timing overhead: {avg_overhead*1e6:.2f} microseconds per call", flush=True)
+    
+    @contextmanager
+    def time_block(self, name: str):
+        """Context manager for timing a code block."""
+        if not self.enabled:
+            yield
+            return
+        
+        timing_start = time.perf_counter()
+        self._measure_overhead()
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            end = time.perf_counter()
+            timing_end = time.perf_counter()
+            
+            elapsed = end - start
+            timing_overhead = (timing_end - timing_start) - elapsed
+            self._timing_overhead_total += max(0, timing_overhead)
+            
+            if name not in self.timings:
+                self.timings[name] = []
+            self.timings[name].append(elapsed)
+    
+    def format_time(self, seconds: float) -> str:
+        """Format seconds into human-readable string."""
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        elif seconds < 3600:
+            return f"{seconds/60:.1f}min"
+        else:
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
+            secs = seconds % 60
+            return f"{hours}h {minutes}min {secs:.0f}s"
+    
+    def print_summary(self):
+        """Print timing summary."""
+        if not self.enabled or not self.timings:
+            return
+        print("\n" + "=" * 80, flush=True)
+        print("⏱️  TIMING SUMMARY", flush=True)
+        print("=" * 80, flush=True)
+        
+        timing_keys = [k for k in self.timings.keys() if k != "Pipeline (Overall)"]
+        total_time = sum(sum(self.timings[k]) for k in timing_keys)
+        
+        for name in sorted(timing_keys):
+            times = self.timings[name]
+            total = sum(times)
+            avg = total / len(times) if times else 0
+            pct = (total / total_time * 100) if total_time > 0 else 0
+            count_str = f" (x{len(times)})" if len(times) > 1 else ""
+            print(f"   {name:35s}: {self.format_time(total):>12s} (avg: {self.format_time(avg)}{count_str}, {pct:5.1f}%)", flush=True)
+        
+        print("=" * 80, flush=True)
+
+# Global timing tracker (initialized in main)
+_timing_tracker = None
 
 def get_gpu_info():
     if not torch.cuda.is_available():
@@ -347,6 +435,16 @@ def load_model_and_tokenizer(
 
 def main():
     args = parse_args()
+    
+    # Initialize timing tracker based on argument
+    global _timing_tracker
+    _timing_tracker = TimingTracker(enabled=getattr(args, "enable_timing", False))
+    if _timing_tracker.enabled:
+        print("   ⏱️  Timing measurements: ENABLED", flush=True)
+    else:
+        print("   ⏱️  Timing measurements: DISABLED", flush=True)
+    
+    pipeline_start = time.perf_counter()
 
     wandb.login(key="4559d55ae1eb6282f60a6d9a13fbf5c65e9ec215", relogin=True)
     wandb.init(
@@ -376,9 +474,11 @@ def main():
 
     split = train_full.train_test_split(test_size=0.05, seed=args.subset_seed)
     train_ds, dev_ds = split["train"], split["test"]
-    print(f"Train {len(train_ds)} | Dev {len(dev_ds)} | Val {len(val_ds)}")
+    print(f"Train {len(train_ds)} | Dev {len(dev_ds)} | Val {len(val_ds)}", flush=True)
 
-    model, tok = load_model_and_tokenizer(
+    # Model + tokenizer
+    with _timing_tracker.time_block("Model Loading"):
+        model, tok = load_model_and_tokenizer(
         args.model_name,
         args.use_lora,
         freeze_layers=args.freeze_layers,
@@ -390,17 +490,18 @@ def main():
         freeze_mlp=getattr(args, "freeze_mlp", False),
         freeze_mlp_no_grad=getattr(args, "freeze_mlp_no_grad", False),
         freeze_mlp_layers=getattr(args, "freeze_mlp_layers", []),
-    )
+        )
     pf = infer_prompt_format_from_model_id(args.model_name)
 
-    tokenized_train = train_ds.map(
-        lambda ex: preprocess_dataset(ex, tok, max_len=1024, prompt_format=pf, is_train=True),
-        remove_columns=train_ds.column_names
-    )
-    tokenized_val = dev_ds.map(
-        lambda ex: preprocess_dataset(ex, tok, max_len=1024, prompt_format=pf, is_train=False),
-        remove_columns=dev_ds.column_names
-    )
+    with _timing_tracker.time_block("Tokenization"):
+        tokenized_train = train_ds.map(
+            lambda ex: preprocess_dataset(ex, tok, max_len=1024, prompt_format=pf, is_train=True),
+            remove_columns=train_ds.column_names
+        )
+        tokenized_val = dev_ds.map(
+            lambda ex: preprocess_dataset(ex, tok, max_len=1024, prompt_format=pf, is_train=False),
+            remove_columns=dev_ds.column_names
+        )
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     training_args = TrainingArguments(
@@ -489,11 +590,13 @@ def main():
     total_update_steps = steps_per_epoch * training_args.num_train_epochs
     print(f">>> Training plan: steps_per_epoch={steps_per_epoch} x epochs={training_args.num_train_epochs} = total_updates={total_update_steps}", flush=True)
 
-    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+    with _timing_tracker.time_block("Training"):
+        trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
 
-    final_dir = f"{args.output_dir}/final_model"
-    trainer.save_model(final_dir)
-    tok.save_pretrained(final_dir)
+    with _timing_tracker.time_block("Model Saving"):
+        final_dir = f"{args.output_dir}/final_model"
+        trainer.save_model(final_dir)
+        tok.save_pretrained(final_dir)
 
     # Delete Hugging Face default checkpoints to save disk
     for path in glob.glob(os.path.join(args.output_dir, "checkpoint-*")):
@@ -516,6 +619,12 @@ def main():
             output_dir=training_args.output_dir,
         )
         print(f"[Final] SQuAD val EM={final['em']:.2f}% F1={final['f1']:.2f}% n={final['n']}", flush=True)
+    
+    # Print timing summary
+    pipeline_end = time.perf_counter()
+    if _timing_tracker.enabled:
+        _timing_tracker.timings["Pipeline (Overall)"] = [pipeline_end - pipeline_start]
+        _timing_tracker.print_summary()
 
 if __name__ == "__main__":
     main()
