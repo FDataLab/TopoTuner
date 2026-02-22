@@ -58,7 +58,7 @@ def order_layers_by_distance(combo_data: pd.DataFrame, matrix_type: str, wassers
 
 
 def main():
-    """Generate layer orderings for Q, K, V based on Wasserstein distance."""
+    """Generate layer orderings for Q, K, V based on Wasserstein distance for all models."""
     
     print("Loading Wasserstein distance data...")
     df = process_all_data()
@@ -66,72 +66,102 @@ def main():
     print(f"Loaded {len(df)} rows")
     print(f"Models found: {sorted(df['Model'].unique())}")
     
-    # Focus on Llama-3.2-3B
-    model_key = "llama32_3b"
-    if model_key not in MODELS:
-        print(f"Error: Model {model_key} not found in MODELS")
-        return
+    # Process all models
+    wasserstein_type = "H0"  # Using H0 as in layer_analysis.txt
     
-    model_df = df[df["Model"] == model_key]
-    if model_df.empty:
-        print(f"Error: No data found for model {model_key}")
-        return
-    
-    print(f"\nProcessing {model_key}...")
-    avg_data = calculate_combined_averages(model_df)
-    
-    if avg_data.empty:
-        print(f"  No combined data after filtering")
-        return
+    # Store results for all models
+    all_results = {}
     
     print("\n" + "="*70)
     print("Layer Ordering by Wasserstein Distance (Lowest to Highest)")
     print("="*70)
-    print("\nUsing WassersteinType: H0 (as in layer_analysis.txt)")
+    print(f"\nUsing WassersteinType: {wasserstein_type}")
     print("MatrixType: Q, K, V\n")
     
-    # Order layers for Q, K, V using H0 (as in the analysis file)
-    wasserstein_type = "H0"
-    
+    # Process each model
+    for model_key in sorted(MODELS.keys()):
+        if model_key not in df['Model'].unique():
+            print(f"⚠️  Warning: Model {model_key} not found in data, skipping...")
+            continue
+        
+        print(f"\n{'='*70}")
+        print(f"Processing: {model_key}")
+        print(f"{'='*70}")
+        
+        model_df = df[df["Model"] == model_key]
+        if model_df.empty:
+            print(f"  ⚠️  No data found for model {model_key}, skipping...")
+            continue
+        
+        avg_data = calculate_combined_averages(model_df)
+        
+        if avg_data.empty:
+            print(f"  ⚠️  No combined data after filtering for {model_key}, skipping...")
+            continue
+        
+        # Order layers for Q, K, V
     q_ordered = order_layers_by_distance(avg_data, "q", wasserstein_type)
     k_ordered = order_layers_by_distance(avg_data, "k", wasserstein_type)
     v_ordered = order_layers_by_distance(avg_data, "v", wasserstein_type)
     
-    print(f"Q layers (ordered lowest to highest distance):")
+        if not q_ordered or not k_ordered or not v_ordered:
+            print(f"  ⚠️  Incomplete data for {model_key}, skipping...")
+            continue
+        
+        # Store results
+        all_results[model_key] = {
+            'q': q_ordered,
+            'k': k_ordered,
+            'v': v_ordered
+        }
+        
+        print(f"\nQ layers (ordered lowest to highest distance):")
     print(f"  {q_ordered}")
     print(f"\nK layers (ordered lowest to highest distance):")
     print(f"  {k_ordered}")
     print(f"\nV layers (ordered lowest to highest distance):")
     print(f"  {v_ordered}")
     
-    # Also print in Python list format for easy copy-paste
-    print("\n" + "="*70)
-    print("Python List Format (for shell script):")
-    print("="*70)
-    print(f"\nQ_ORDERED_LAYERS=({' '.join(map(str, q_ordered))})")
+        # Print shell script format
+        print(f"\n--- Shell Script Format for {model_key} ---")
+        print(f"Q_ORDERED_LAYERS=({' '.join(map(str, q_ordered))})")
     print(f"K_ORDERED_LAYERS=({' '.join(map(str, k_ordered))})")
     print(f"V_ORDERED_LAYERS=({' '.join(map(str, v_ordered))})")
     
-    # Verify lowest 3 match the analysis file
-    print("\n" + "="*70)
-    print("Verification: Lowest 3 layers (should match layer_analysis.txt):")
-    print("="*70)
-    print(f"Q lowest 3: {q_ordered[:3]} (expected: [0, 16, 23])")
-    print(f"K lowest 3: {k_ordered[:3]} (expected: [15, 8, 0])")
-    print(f"V lowest 3: {v_ordered[:3]} (expected: [25, 23, 27])")
-    
-    # Save to file
+    # Save all results to file
     output_file = os.path.join(os.path.dirname(__file__), "../../layer_orderings.txt")
     with open(output_file, "w") as f:
         f.write("# Layer orderings by Wasserstein distance (lowest to highest)\n")
         f.write("# Generated from Wasserstein distance analysis\n")
+        f.write(f"# WassersteinType: {wasserstein_type}\n")
+        f.write("# Format: Layers are ordered from lowest to highest Wasserstein distance\n")
+        f.write("# Usage: Copy the arrays for your model into your shell script\n\n")
+        
+        for model_key in sorted(all_results.keys()):
+            results = all_results[model_key]
+            f.write(f"# ============================================================\n")
         f.write(f"# Model: {model_key}\n")
-        f.write(f"# WassersteinType: {wasserstein_type}\n\n")
-        f.write(f"Q_ORDERED_LAYERS=({' '.join(map(str, q_ordered))})\n")
-        f.write(f"K_ORDERED_LAYERS=({' '.join(map(str, k_ordered))})\n")
-        f.write(f"V_ORDERED_LAYERS=({' '.join(map(str, v_ordered))})\n")
+            f.write(f"# ============================================================\n\n")
+            
+            f.write(f"# {model_key} - Q projection layers (ordered lowest to highest)\n")
+            f.write(f"Q_ORDERED_LAYERS_{model_key.upper().replace('-', '_')}=({' '.join(map(str, results['q']))})\n\n")
+            
+            f.write(f"# {model_key} - K projection layers (ordered lowest to highest)\n")
+            f.write(f"K_ORDERED_LAYERS_{model_key.upper().replace('-', '_')}=({' '.join(map(str, results['k']))})\n\n")
+            
+            f.write(f"# {model_key} - V projection layers (ordered lowest to highest)\n")
+            f.write(f"V_ORDERED_LAYERS_{model_key.upper().replace('-', '_')}=({' '.join(map(str, results['v']))})\n\n")
+            
+            # Also write in shell script format (without model suffix for easier copy-paste)
+            f.write(f"# Shell script format (for direct copy-paste):\n")
+            f.write(f"# Q_ORDERED_LAYERS=({' '.join(map(str, results['q']))})\n")
+            f.write(f"# K_ORDERED_LAYERS=({' '.join(map(str, results['k']))})\n")
+            f.write(f"# V_ORDERED_LAYERS=({' '.join(map(str, results['v']))})\n\n")
     
-    print(f"\n✅ Saved to: {output_file}")
+    print(f"\n{'='*70}")
+    print(f"✅ Saved all layer orderings to: {output_file}")
+    print(f"{'='*70}")
+    print(f"\nProcessed {len(all_results)} model(s): {', '.join(sorted(all_results.keys()))}")
 
 
 if __name__ == "__main__":

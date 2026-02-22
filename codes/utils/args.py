@@ -31,11 +31,9 @@ def parse_args():
     parser.add_argument("--freeze-q-layers", nargs="*", type=int, default=[], help="Freeze ONLY q_proj in these layer idxs")
     parser.add_argument("--freeze-k-layers", nargs="*", type=int, default=[], help="Freeze ONLY k_proj in these layer idxs")
     parser.add_argument("--freeze-v-layers", nargs="*", type=int, default=[], help="Freeze ONLY v_proj in these layer idxs")
-    parser.add_argument(
-        "--freeze-qkv-no-grad",
-        action="store_true",
-        help="Detach outputs for frozen q/k/v projections to skip backward for those ops (saves time, stops grad to earlier layers)"
-    )
+    # ❌ REMOVED: --freeze-qkv-no-grad (blocks gradient flow to K/MLP)
+    # ❌ REMOVED: --freeze-mlp-no-grad (blocks gradient flow)
+    # Use ONLY requires_grad=False for freezing (keeps autograd graph intact)
     parser.add_argument(
         "--freeze-o-with-qkv",
         action="store_true",
@@ -47,16 +45,11 @@ def parse_args():
         help="Also freeze MLP (gate_proj, up_proj, down_proj) in any layer frozen via --freeze-q-layers / --freeze-k-layers / --freeze-v-layers (enables K+O+MLP, Q+O+MLP, V+O+MLP experiments)"
     )
     parser.add_argument(
-        "--freeze-mlp-no-grad",
-        action="store_true",
-        help="Wrap MLP (gate_proj, up_proj, down_proj) forwards with no_grad() in selected layers (saves compute like freeze-qkv-no-grad, for K+O+MLP experiments)"
-    )
-    parser.add_argument(
         "--freeze-mlp-layers",
         nargs="*",
         type=int,
         default=[],
-        help="Layer indices whose MLP blocks (gate_proj, up_proj, down_proj) should be wrapped with no_grad(); typically matches K-layer set for K+O+MLP"
+        help="Layer indices whose MLP blocks (gate_proj, up_proj, down_proj) should be frozen"
     )
     
     # ===== KADIR'S VERSION (COMMENTED OUT - PRESERVED FOR REFERENCE) =====

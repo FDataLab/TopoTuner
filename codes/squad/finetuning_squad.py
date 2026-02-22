@@ -24,7 +24,11 @@ from .data_preprocessing_squad import (
 from .eval_squad import evaluate_squad
 
 from codes.utils.args import parse_args
-from codes.utils.model_saving import SavePeftModelCallback
+from codes.utils.model_saving import (
+    SavePeftModelCallback,
+    concise_lora_filename,
+    concise_full_filename,
+)
 
 from transformers.utils import logging as hf_logging
 hf_logging.enable_progress_bar()
@@ -108,13 +112,57 @@ class TimingTracker:
         timing_keys = [k for k in self.timings.keys() if k != "Pipeline (Overall)"]
         total_time = sum(sum(self.timings[k]) for k in timing_keys)
         
+        step_timing_key = "Training (Forward+Backward+Optimizer per step)"
         for name in sorted(timing_keys):
+            if name == step_timing_key:
+                continue
             times = self.timings[name]
             total = sum(times)
             avg = total / len(times) if times else 0
             pct = (total / total_time * 100) if total_time > 0 else 0
             count_str = f" (x{len(times)})" if len(times) > 1 else ""
             print(f"   {name:35s}: {self.format_time(total):>12s} (avg: {self.format_time(avg)}{count_str}, {pct:5.1f}%)", flush=True)
+        
+        forward_key = "Training (Forward Pass)"
+        backward_key = "Training (Backward Pass)"
+        optimizer_key = "Training (Optimizer Step)"
+        
+        if forward_key in self.timings or backward_key in self.timings:
+            print(f"\n   {'Training Breakdown (Per Step)':35s}:", flush=True)
+            
+            if forward_key in self.timings:
+                forward_times = self.timings[forward_key]
+                total_forward = sum(forward_times)
+                avg_forward = total_forward / len(forward_times) if forward_times else 0
+                pct_forward = (total_forward / total_time * 100) if total_time > 0 else 0
+                print(f"      {'  → Forward Pass':33s}: {self.format_time(total_forward):>12s} (avg: {self.format_time(avg_forward)}, {pct_forward:5.1f}%)", flush=True)
+            
+            if backward_key in self.timings:
+                backward_times = self.timings[backward_key]
+                total_backward = sum(backward_times)
+                avg_backward = total_backward / len(backward_times) if backward_times else 0
+                pct_backward = (total_backward / total_time * 100) if total_time > 0 else 0
+                print(f"      {'  → Backward Pass':33s}: {self.format_time(total_backward):>12s} (avg: {self.format_time(avg_backward)}, {pct_backward:5.1f}%)", flush=True)
+            
+            if optimizer_key in self.timings:
+                optimizer_times = self.timings[optimizer_key]
+                total_optimizer = sum(optimizer_times)
+                avg_optimizer = total_optimizer / len(optimizer_times) if optimizer_times else 0
+                pct_optimizer = (total_optimizer / total_time * 100) if total_time > 0 else 0
+                print(f"      {'  → Optimizer Step':33s}: {self.format_time(total_optimizer):>12s} (avg: {self.format_time(avg_optimizer)}, {pct_optimizer:5.1f}%)", flush=True)
+        
+        if step_timing_key in self.timings:
+            step_times = self.timings[step_timing_key]
+            if step_times:
+                total_steps_time = sum(step_times)
+                avg_step = sum(step_times) / len(step_times)
+                min_step = min(step_times)
+                max_step = max(step_times)
+                pct = (total_steps_time / total_time * 100) if total_time > 0 else 0
+                print(f"\n   {'Training (Per Step Total)':35s}: {self.format_time(total_steps_time):>12s} ({len(step_times)} steps, {pct:5.1f}%)", flush=True)
+                print(f"      {'  → Avg per step':33s}: {self.format_time(avg_step):>12s}", flush=True)
+                print(f"      {'  → Min per step':33s}: {self.format_time(min_step):>12s}", flush=True)
+                print(f"      {'  → Max per step':33s}: {self.format_time(max_step):>12s}", flush=True)
         
         print("=" * 80, flush=True)
 
@@ -134,6 +182,169 @@ def get_gpu_info():
         "mem_reserved_MB": torch.cuda.memory_reserved(gpu_id) // 1024**2,
     }
 
+class DetailedTimingTrainer(Trainer):
+    """Custom Trainer that tracks forward, backward, and optimizer timing separately."""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._epoch_forward_times = {}
+        self._epoch_backward_times = {}
+        self._epoch_optimizer_times = {}
+    
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        """Override training_step to time forward, backward, and optimizer separately."""
+        global _timing_tracker
+        
+        if not (_timing_tracker and _timing_tracker.enabled):
+            return super().training_step(model, inputs, num_items_in_batch)
+        
+        model.train()
+        inputs = self._prepare_inputs(inputs)
+        
+        # Time forward pass
+        forward_start = time.perf_counter()
+        loss = self.compute_loss(model, inputs)
+        forward_end = time.perf_counter()
+        forward_time = forward_end - forward_start
+        _timing_tracker.timings.setdefault("Training (Forward Pass)", []).append(forward_time)
+        
+        epoch_num = int(self.state.epoch) if self.state.epoch is not None else 0
+        if epoch_num not in self._epoch_forward_times:
+            self._epoch_forward_times[epoch_num] = []
+        self._epoch_forward_times[epoch_num].append(forward_time)
+        
+        # Handle gradient accumulation scaling
+        if self.args.gradient_accumulation_steps > 1 and not getattr(self, 'deepspeed', None):
+            loss = loss / self.args.gradient_accumulation_steps
+        
+        # Time backward pass
+        backward_start = time.perf_counter()
+        do_grad_scaling = getattr(self, 'do_grad_scaling', False)
+        use_apex = getattr(self, 'use_apex', False)
+        
+        if do_grad_scaling and hasattr(self, 'scaler'):
+            self.scaler.scale(loss).backward()
+        elif use_apex and hasattr(self, 'optimizer'):
+            try:
+                import apex  # type: ignore
+                with apex.amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            except ImportError:
+                loss.backward()
+        else:
+            loss.backward()
+        backward_end = time.perf_counter()
+        backward_time = backward_end - backward_start
+        _timing_tracker.timings.setdefault("Training (Backward Pass)", []).append(backward_time)
+        
+        if epoch_num not in self._epoch_backward_times:
+            self._epoch_backward_times[epoch_num] = []
+        self._epoch_backward_times[epoch_num].append(backward_time)
+        
+        # Time optimizer step
+        optimizer_time = 0.0
+        if (self.state.global_step + 1) % self.args.gradient_accumulation_steps == 0:
+            optimizer_start = time.perf_counter()
+            
+            if do_grad_scaling and hasattr(self, 'scaler'):
+                self.scaler.unscale_(self.optimizer)
+                if self.args.max_grad_norm is not None and self.args.max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.max_grad_norm)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                if self.args.max_grad_norm is not None and self.args.max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.max_grad_norm)
+                self.optimizer.step()
+            
+            self.optimizer.zero_grad()
+            
+            if self.lr_scheduler is not None:
+                self.lr_scheduler.step()
+            
+            optimizer_end = time.perf_counter()
+            optimizer_time = optimizer_end - optimizer_start
+            _timing_tracker.timings.setdefault("Training (Optimizer Step)", []).append(optimizer_time)
+            
+            if epoch_num not in self._epoch_optimizer_times:
+                self._epoch_optimizer_times[epoch_num] = []
+            self._epoch_optimizer_times[epoch_num].append(optimizer_time)
+        
+        return loss.detach() / self.args.gradient_accumulation_steps
+    
+    def log_epoch_timing_breakdown(self, epoch_num: int):
+        """Log forward/backward/optimizer breakdown for a specific epoch."""
+        global _timing_tracker
+        if not (_timing_tracker and _timing_tracker.enabled):
+            return
+        
+        forward_times = self._epoch_forward_times.get(epoch_num, [])
+        backward_times = self._epoch_backward_times.get(epoch_num, [])
+        optimizer_times = self._epoch_optimizer_times.get(epoch_num, [])
+        
+        if not forward_times:
+            return
+        
+        total_forward = sum(forward_times)
+        total_backward = sum(backward_times)
+        total_optimizer = sum(optimizer_times)
+        total_epoch = total_forward + total_backward + total_optimizer
+        
+        avg_forward = total_forward / len(forward_times) if forward_times else 0
+        avg_backward = total_backward / len(backward_times) if backward_times else 0
+        avg_optimizer = total_optimizer / len(optimizer_times) if optimizer_times else 0
+        
+        print(f"\n   📊 Epoch {epoch_num} Timing Breakdown:", flush=True)
+        print(f"      → Forward Pass:  {_timing_tracker.format_time(total_forward):>12s} (avg: {_timing_tracker.format_time(avg_forward)}, {len(forward_times)} steps)", flush=True)
+        print(f"      → Backward Pass: {_timing_tracker.format_time(total_backward):>12s} (avg: {_timing_tracker.format_time(avg_backward)}, {len(backward_times)} steps)", flush=True)
+        if optimizer_times:
+            print(f"      → Optimizer Step: {_timing_tracker.format_time(total_optimizer):>12s} (avg: {_timing_tracker.format_time(avg_optimizer)}, {len(optimizer_times)} steps)", flush=True)
+        print(f"      → Total: {_timing_tracker.format_time(total_epoch):>12s}", flush=True)
+
+
+class TrainingStepTimingCallback(TrainerCallback):
+    """Track per-step timing within training and log detailed breakdown per epoch."""
+    def __init__(self):
+        self.step_start_time = None
+        self.step_times = []
+        self.current_epoch = None
+        self.epoch_step_times = {}
+    
+    def on_step_begin(self, args, state, control, **kwargs):
+        """Track step start time."""
+        global _timing_tracker
+        if _timing_tracker and _timing_tracker.enabled:
+            self.step_start_time = time.perf_counter()
+    
+    def on_step_end(self, args, state, control, **kwargs):
+        """Track step end time and accumulate."""
+        global _timing_tracker
+        if _timing_tracker and _timing_tracker.enabled and self.step_start_time is not None:
+            step_elapsed = time.perf_counter() - self.step_start_time
+            self.step_times.append(step_elapsed)
+            
+            epoch_num = int(state.epoch) if state.epoch is not None else 0
+            if epoch_num not in self.epoch_step_times:
+                self.epoch_step_times[epoch_num] = []
+            self.epoch_step_times[epoch_num].append(step_elapsed)
+    
+    def on_epoch_end(self, args, state, control, trainer=None, **kwargs):
+        """Log per-epoch step timing summary and detailed breakdown."""
+        global _timing_tracker
+        if _timing_tracker and _timing_tracker.enabled:
+            epoch_num = int(state.epoch) if state.epoch is not None else 0
+            if epoch_num in self.epoch_step_times:
+                epoch_steps = self.epoch_step_times[epoch_num]
+                if epoch_steps:
+                    avg_step = sum(epoch_steps) / len(epoch_steps)
+                    total_epoch_steps = sum(epoch_steps)
+                    _timing_tracker.timings.setdefault("Training (Forward+Backward+Optimizer per step)", []).extend(epoch_steps)
+                    print(f"   ⏱️  Epoch {epoch_num}: {len(epoch_steps)} steps, avg {_timing_tracker.format_time(avg_step)}/step, total {_timing_tracker.format_time(total_epoch_steps)}", flush=True)
+            
+            if trainer is not None and isinstance(trainer, DetailedTimingTrainer):
+                trainer.log_epoch_timing_breakdown(epoch_num)
+
+
 class LossDebugCallback(TrainerCallback):
     def on_log(self, args, state, control, logs=None, **kwargs):
         if logs is not None and "loss" in logs:
@@ -142,7 +353,7 @@ class LossDebugCallback(TrainerCallback):
 
 class EMF1PerEpochCallback(TrainerCallback):
     def __init__(self, tokenizer, run_eval: bool = True, split: str = "validation",
-                 limit=None, max_new_tokens: int = 256,
+                 limit=None, max_new_tokens: int = 12,  # Short answers only (SQuAD answers are typically 1-5 words)
                  log_jsonl=None, log_tsv=None, dataset="", model=""):
         self.tok = tokenizer
         self.run_eval = run_eval
@@ -433,6 +644,70 @@ def load_model_and_tokenizer(
     model.gradient_checkpointing_enable()
     return model, tok
 
+
+# =========================================================
+# Baseline saving (epoch-0) preserved
+# =========================================================
+def save_epoch0_baseline_if_needed(args, model, tok):
+    if not (getattr(args, "save_every_epoch", False) or getattr(args, "save_npy", False)):
+        return
+
+    base_dir = os.path.join(args.output_dir, "epoch_weights")
+    os.makedirs(base_dir, exist_ok=True)
+    save_dir = os.path.join(base_dir, "checkpoint-epoch-0")
+
+    if os.path.exists(save_dir):
+        print(f">>> Epoch-0 already exists at {save_dir}, skipping baseline save", flush=True)
+        return
+
+    print(f">>> Saving baseline as epoch-0 to {save_dir}", flush=True)
+    os.makedirs(save_dir, exist_ok=True)
+    model.save_pretrained(save_dir)
+    tok.save_pretrained(save_dir)
+
+    import torch as _torch
+    _torch.save(args, os.path.join(save_dir, "training_args.bin"))
+
+    if not getattr(args, "save_npy", False):
+        return
+
+    import numpy as _np
+    npy_dir = os.path.join(save_dir, "numpy_weights")
+    os.makedirs(npy_dir, exist_ok=True)
+
+    count = 0
+    for name, param in model.named_parameters():
+        if args.use_lora:
+            if "lora_A" in name or "lora_B" in name:
+                short = concise_lora_filename(name)
+                if short:
+                    arr = param.detach().cpu().to(_torch.float16)
+                    _np.save(os.path.join(npy_dir, f"{short}.npy"), arr.numpy())
+                    count += 1
+        else:
+            if param.requires_grad:
+                short = concise_full_filename(name)
+                if short:
+                    arr = param.detach().cpu().to(_torch.float16)
+                    _np.save(os.path.join(npy_dir, f"{short}.npy"), arr.numpy())
+                    count += 1
+
+    print(f"✅ [baseline] Saved {count} tensors (float16) to: {npy_dir}", flush=True)
+
+
+def cleanup_checkpoints(args):
+    # Delete Hugging Face default checkpoints
+    for path in glob.glob(os.path.join(args.output_dir, "checkpoint-*")):
+        print(f"🗑️ Removing default checkpoint: {path}", flush=True)
+        shutil.rmtree(path, ignore_errors=True)
+
+    # Delete final_model if it exists (align with your IMDB behavior)
+    final_model_path = os.path.join(args.output_dir, "final_model")
+    if os.path.exists(final_model_path):
+        print(f"🗑️ Removing final model folder: {final_model_path}", flush=True)
+        shutil.rmtree(final_model_path, ignore_errors=True)
+
+
 def main():
     args = parse_args()
     
@@ -452,7 +727,7 @@ def main():
         name=f"squad-run-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}",
         entity="kadirerol"
     )
-    run_eval = True
+    run_eval = False  # Disable evaluation during training (match HotpotQA)
 
     subset_dir = args.subset_save_dir
     if subset_dir and os.path.exists(os.path.join(subset_dir, "state.json")):
@@ -495,11 +770,11 @@ def main():
 
     with _timing_tracker.time_block("Tokenization"):
         tokenized_train = train_ds.map(
-            lambda ex: preprocess_dataset(ex, tok, max_len=1024, prompt_format=pf, is_train=True),
+            lambda ex: preprocess_dataset(ex, tok, max_len=1024, prompt_format=pf, is_train=True),  # SQuAD max is ~517 tokens, 512 will truncate ~0.1% of longest examples
             remove_columns=train_ds.column_names
         )
         tokenized_val = dev_ds.map(
-            lambda ex: preprocess_dataset(ex, tok, max_len=1024, prompt_format=pf, is_train=False),
+            lambda ex: preprocess_dataset(ex, tok, max_len=1024, prompt_format=pf, is_train=False),  # SQuAD max is ~517 tokens, 512 will truncate ~0.1% of longest examples
             remove_columns=dev_ds.column_names
         )
 
@@ -512,11 +787,9 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={'use_reentrant': False},
-        eval_strategy="epoch",
+        eval_strategy="no",
         save_strategy="epoch" if args.save_every_epoch else "no",
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
+        load_best_model_at_end=False,
         learning_rate=args.learning_rate,
         num_train_epochs=args.epochs,
         optim="paged_adamw_32bit",
@@ -530,31 +803,16 @@ def main():
         label_names=["labels"],
     )
 
-    safe_model = args.model_name.replace("/", "_")
-    safe_dataset = args.dataset_name.replace("/", "_")
-    log_jsonl = os.path.join(args.output_dir, f"{safe_dataset}_{safe_model}_downstream_eval.jsonl")
-    log_tsv = os.path.join(args.output_dir, f"{safe_dataset}_{safe_model}_downstream_eval.tsv")
-    run_name  = wandb.run.name if wandb.run else ""
-
-    callbacks = [
-        EMF1PerEpochCallback(
-            tok,
-            run_eval=True,
-            split="validation",
-            limit=None,
-            max_new_tokens=256,
-            log_jsonl=log_jsonl,
-            log_tsv=log_tsv,
-            dataset=args.dataset_name,
-            model=args.model_name
-        ),
-        LossDebugCallback(),
-    ]
+    callbacks = [LossDebugCallback()]
     if args.save_every_epoch or args.save_npy:
         callbacks.insert(0, SavePeftModelCallback(args, tokenizer=tok))
+    
+    if _timing_tracker and _timing_tracker.enabled:
+        callbacks.append(TrainingStepTimingCallback())
 
     collator = partial(custom_data_collator, tokenizer=tok)
-    trainer = Trainer(
+    TrainerClass = DetailedTimingTrainer if (_timing_tracker and _timing_tracker.enabled) else Trainer
+    trainer = TrainerClass(
         model=model,
         tokenizer=tok,
         args=training_args,
@@ -566,65 +824,38 @@ def main():
 
     print(">>> Callbacks attached:", trainer.callback_handler.callbacks, flush=True)
 
-    if run_eval:
-        print(">>> Running baseline evaluation before training...", flush=True)
-        base = evaluate_squad(
-            model, tok,
-            split="validation",
-            limit=None,
-            max_new_tokens=256,
-            progress_bar=True,
-            save_jsonl=log_jsonl,
-            save_tsv=log_tsv,
-            run_name=run_name,
-            phase="baseline",
-            epoch=0,
-            step=0,
-            output_dir=training_args.output_dir,
-        )
-        print(f"[Baseline] SQuAD val EM={base['em']:.2f}% F1={base['f1']:.2f}% n={base['n']}", flush=True)
-        print(">>> Baseline evaluation finished, starting training...", flush=True)
+    # Save baseline (epoch 0)
+    save_epoch0_baseline_if_needed(args, model, tok)
 
-    train_dl = trainer.get_train_dataloader()
-    steps_per_epoch = len(train_dl)
+    # Print training plan
+    steps_per_epoch = len(trainer.get_train_dataloader())
     total_update_steps = steps_per_epoch * training_args.num_train_epochs
-    print(f">>> Training plan: steps_per_epoch={steps_per_epoch} x epochs={training_args.num_train_epochs} = total_updates={total_update_steps}", flush=True)
+    print(
+        f">>> Training plan: steps_per_epoch={steps_per_epoch} x epochs={training_args.num_train_epochs} = total_updates={total_update_steps}",
+        flush=True
+    )
 
-    with _timing_tracker.time_block("Training"):
+    # Train
+    with _timing_tracker.time_block("Training (Total)"):
         trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
+    
+    # Calculate and print overall pipeline timing
+    pipeline_end = time.perf_counter()
+    pipeline_total = pipeline_end - pipeline_start
+    _timing_tracker.timings["Pipeline (Overall)"] = [pipeline_total]
+    
+    # Print timing summary
+    _timing_tracker.print_summary()
 
+    # Save final then delete
     with _timing_tracker.time_block("Model Saving"):
         final_dir = f"{args.output_dir}/final_model"
         trainer.save_model(final_dir)
         tok.save_pretrained(final_dir)
 
-    # Delete Hugging Face default checkpoints to save disk
-    for path in glob.glob(os.path.join(args.output_dir, "checkpoint-*")):
-        print(f"🗑️ Removing default checkpoint: {path}")
-        shutil.rmtree(path, ignore_errors=True)
+    cleanup_checkpoints(args)
 
-    if run_eval:
-        final = evaluate_squad(
-            model, tok,
-            split="validation",
-            limit=None,
-            max_new_tokens=256,
-            progress_bar=True,
-            save_jsonl=log_jsonl,
-            save_tsv=log_tsv,
-            run_name=run_name,
-            phase="final",
-            epoch=int(training_args.num_train_epochs),
-            step=int(trainer.state.global_step),
-            output_dir=training_args.output_dir,
-        )
-        print(f"[Final] SQuAD val EM={final['em']:.2f}% F1={final['f1']:.2f}% n={final['n']}", flush=True)
-    
-    # Print timing summary
-    pipeline_end = time.perf_counter()
-    if _timing_tracker.enabled:
-        _timing_tracker.timings["Pipeline (Overall)"] = [pipeline_end - pipeline_start]
-        _timing_tracker.print_summary()
+    print("[Training] Final evaluation disabled. Will evaluate manually later.", flush=True)
 
 if __name__ == "__main__":
     main()

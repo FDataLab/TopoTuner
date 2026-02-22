@@ -620,12 +620,16 @@ def load_model_and_tokenizer(
     freeze_q_layers=None,
     freeze_k_layers=None,
     freeze_v_layers=None,
-    freeze_qkv_no_grad: bool = False,
+    freeze_qkv_no_grad: bool = False,  # ❌ DEPRECATED: kept for compatibility but must be False
     freeze_o_with_qkv: bool = False,
     freeze_mlp: bool = False,
-    freeze_mlp_no_grad: bool = False,
+    freeze_mlp_no_grad: bool = False,  # ❌ DEPRECATED: kept for compatibility but must be False
     freeze_mlp_layers=None,
 ):
+    # ✅ Safety checks: no_grad flags break gradient flow to K/MLP
+    assert not freeze_qkv_no_grad, "❌ ERROR: --freeze-qkv-no-grad blocks gradient flow to K/MLP. Use ONLY requires_grad=False."
+    assert not freeze_mlp_no_grad, "❌ ERROR: --freeze-mlp-no-grad blocks gradient flow. Use ONLY requires_grad=False."
+    
     freeze_layers = freeze_layers or []
     freeze_q_layers = freeze_q_layers or []
     freeze_k_layers = freeze_k_layers or []
@@ -781,31 +785,51 @@ def load_model_and_tokenizer(
         print(f"🧊 Freezing projections: Q={sorted(qset)} K={sorted(kset)} V={sorted(vset)}", flush=True)
         if freeze_o_with_qkv:
             print("   ➕ Also freezing o_proj in any layer present in Q/K/V sets (K+O, Q+O, V+O enabled)", flush=True)
+        if freeze_mlp:
+            print("   ➕ Also freezing MLP (gate_proj, up_proj, down_proj) in any layer present in Q/K/V sets (K+MLP, Q+MLP, V+MLP enabled)", flush=True)
+
+        # Get all layer indices (0-31 for Llama-3.1-8B)
+        try:
+            transformer_layers = model.transformer.layers  # Qwen-like
+        except AttributeError:
+            transformer_layers = model.model.layers        # LLaMA-like
+        all_layer_indices = set(range(len(transformer_layers)))
 
         for name, p in model.named_parameters():
             # Match layer index in parameter name (common patterns: ".layers.{i}.")
             hit_layer = None
-            for i in (qset | kset | vset):
+            for i in all_layer_indices:
                 if f".layers.{i}." in name:
                     hit_layer = i
                     break
             if hit_layer is None:
                 continue
 
+            # Determine if this parameter should be frozen
+            should_freeze = False
+            
             # Freeze selectively by projection
             if hit_layer in qset and ".q_proj." in name:
-                p.requires_grad = False
-            if hit_layer in kset and ".k_proj." in name:
-                p.requires_grad = False
-            if hit_layer in vset and ".v_proj." in name:
-                p.requires_grad = False
+                should_freeze = True
+            elif hit_layer in kset and ".k_proj." in name:
+                should_freeze = True
+            elif hit_layer in vset and ".v_proj." in name:
+                should_freeze = True
             # Optionally also freeze o_proj in those layers
-            if freeze_o_with_qkv and ".o_proj." in name and hit_layer in (qset | kset | vset):
-                p.requires_grad = False
-            # Optionally also freeze MLP in those layers (K+O+MLP, Q+O+MLP, V+O+MLP experiments)
-            if freeze_mlp and hit_layer in (qset | kset | vset):
+            elif freeze_o_with_qkv and ".o_proj." in name and hit_layer in (qset | kset | vset):
+                should_freeze = True
+            # Optionally also freeze MLP in specified layers
+            elif hit_layer in set(freeze_mlp_layers):
                 if ".gate_proj." in name or ".up_proj." in name or ".down_proj." in name:
-                    p.requires_grad = False
+                    should_freeze = True
+            
+            # Apply the freezing decision
+            p.requires_grad = not should_freeze
+            
+            # Debug: Print first few K projections to verify
+            if ".k_proj." in name and hit_layer in [0, 1, 31]:
+                status = "FROZEN" if should_freeze else "TRAINABLE"
+                print(f"   [DEBUG] Layer {hit_layer} k_proj: {status} (requires_grad={p.requires_grad})", flush=True)
 
     # ===== KADIR'S VERSION (COMMENTED OUT - PRESERVED FOR REFERENCE) =====
     # # --------------------------
@@ -890,12 +914,19 @@ def load_model_and_tokenizer(
     if (
         freeze_qkv_no_grad and (freeze_q_layers or freeze_k_layers or freeze_v_layers)
     ) or (
-        freeze_mlp_no_grad and freeze_mlp_layers
+        freeze_mlp_no_grad and (freeze_mlp_layers or (freeze_mlp and (freeze_q_layers or freeze_k_layers or freeze_v_layers)))
     ):
         qset = set(freeze_q_layers or [])
         kset = set(freeze_k_layers or [])
         vset = set(freeze_v_layers or [])
-        mlpset = set(freeze_mlp_layers or [])
+        # Use freeze_mlp_layers if provided, otherwise use the intersection of Q/K/V if freeze_mlp is True
+        if freeze_mlp_layers:
+            mlpset = set(freeze_mlp_layers)
+        elif freeze_mlp and (freeze_q_layers or freeze_k_layers or freeze_v_layers):
+            # Use the union of Q/K/V layers for MLP freezing
+            mlpset = qset | kset | vset
+        else:
+            mlpset = set()
 
         print("⚠️  no_grad wrappers enabled:", flush=True)
         if qset or kset or vset:
@@ -920,6 +951,27 @@ def load_model_and_tokenizer(
             also_o_proj=freeze_o_with_qkv,
         )
 
+    # Debug: Print trainable parameters summary
+    total_params = 0
+    trainable_params = 0
+    k_proj_trainable = 0
+    k_proj_total = 0
+    
+    for name, p in model.named_parameters():
+        total_params += p.numel()
+        if p.requires_grad:
+            trainable_params += p.numel()
+        
+        if ".k_proj." in name:
+            k_proj_total += 1
+            if p.requires_grad:
+                k_proj_trainable += 1
+    
+    print(f"\n📊 Parameter Summary:", flush=True)
+    print(f"   Total parameters: {total_params:,}", flush=True)
+    print(f"   Trainable parameters: {trainable_params:,} ({100.0*trainable_params/total_params:.2f}%)", flush=True)
+    print(f"   K projections: {k_proj_trainable}/{k_proj_total} trainable\n", flush=True)
+    
     model.gradient_checkpointing_enable()
     return model, tok
 
