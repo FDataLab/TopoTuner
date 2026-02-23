@@ -1287,3 +1287,116 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# =========================================================
+# REFERENCE: Original freezing logic (from codex snapshot)
+# =========================================================
+#
+# def load_model_and_tokenizer(
+#     model_id, use_lora,
+#     freeze_layers=None,
+#     freeze_q_layers=None,
+#     freeze_k_layers=None,
+#     freeze_v_layers=None,
+#     freeze_qkv_no_grad=False,
+# ):
+#     freeze_layers = freeze_layers or []
+#     freeze_q_layers = freeze_q_layers or []
+#     freeze_k_layers = freeze_k_layers or []
+#     freeze_v_layers = freeze_v_layers or []
+#
+#     # --- Helper: wrap a module's forward with torch.no_grad() ---
+#     def _wrap_no_grad(module, label):
+#         original_forward = module.forward
+#         def forward_no_grad(*args, **kwargs):
+#             with torch.no_grad():
+#                 return original_forward(*args, **kwargs)
+#         module.forward = forward_no_grad
+#
+#     def _apply_no_grad_wrappers(transformer_layers, qset, kset, vset):
+#         for idx, layer in enumerate(transformer_layers):
+#             if idx not in (qset | kset | vset):
+#                 continue
+#             attn = getattr(layer, "self_attn", None) or getattr(layer, "attn", None)
+#             if attn is None:
+#                 continue
+#             if idx in qset and hasattr(attn, "q_proj"):
+#                 _wrap_no_grad(attn.q_proj, f"Layer {idx} q_proj")
+#             if idx in kset and hasattr(attn, "k_proj"):
+#                 _wrap_no_grad(attn.k_proj, f"Layer {idx} k_proj")
+#             if idx in vset and hasattr(attn, "v_proj"):
+#                 _wrap_no_grad(attn.v_proj, f"Layer {idx} v_proj")
+#
+#     # ... (tokenizer + model loading) ...
+#
+#     # --- Step 1: Freeze entire transformer layers ---
+#     if freeze_layers:
+#         try:
+#             transformer_layers = model.transformer.layers  # Qwen-like
+#         except AttributeError:
+#             transformer_layers = model.model.layers        # LLaMA-like
+#         for idx, layer in enumerate(transformer_layers):
+#             if idx in freeze_layers:
+#                 for p in layer.parameters():
+#                     p.requires_grad = False
+#
+#     # --- Step 2: Freeze individual Q/K/V projections by layer ---
+#     if freeze_q_layers or freeze_k_layers or freeze_v_layers:
+#         qset = set(freeze_q_layers)
+#         kset = set(freeze_k_layers)
+#         vset = set(freeze_v_layers)
+#         for name, p in model.named_parameters():
+#             hit_layer = None
+#             for i in (qset | kset | vset):
+#                 if f".layers.{i}." in name:
+#                     hit_layer = i
+#                     break
+#             if hit_layer is None:
+#                 continue
+#             if hit_layer in qset and ".q_proj." in name:
+#                 p.requires_grad = False
+#             if hit_layer in kset and ".k_proj." in name:
+#                 p.requires_grad = False
+#             if hit_layer in vset and ".v_proj." in name:
+#                 p.requires_grad = False
+#
+#     # --- Step 3 (LoRA): Also freeze LoRA params in frozen layers ---
+#     if use_lora:
+#         lcfg = LoraConfig(r=8, lora_alpha=16,
+#                           target_modules=["q_proj","k_proj","v_proj"],
+#                           lora_dropout=0.1, bias="none",
+#                           task_type=TaskType.CAUSAL_LM)
+#         model = get_peft_model(model, lcfg)
+#         if freeze_layers:
+#             for name, p in model.named_parameters():
+#                 if "lora_" not in name:
+#                     continue
+#                 for layer_idx in freeze_layers:
+#                     if f".layers.{layer_idx}." in name:
+#                         p.requires_grad = False
+#                         break
+#         if freeze_q_layers or freeze_k_layers or freeze_v_layers:
+#             for name, p in model.named_parameters():
+#                 if "lora_" not in name:
+#                     continue
+#                 layer_hit = None
+#                 for i in (qset | kset | vset):
+#                     if f".layers.{i}." in name:
+#                         layer_hit = i
+#                         break
+#                 if layer_hit is None:
+#                     continue
+#                 if layer_hit in qset and "q_proj" in name:
+#                     p.requires_grad = False
+#                 if layer_hit in kset and "k_proj" in name:
+#                     p.requires_grad = False
+#                 if layer_hit in vset and "v_proj" in name:
+#                     p.requires_grad = False
+#
+#     # --- Step 4 (optional): no_grad wrapper for speed ---
+#     if freeze_qkv_no_grad and (freeze_q_layers or freeze_k_layers or freeze_v_layers):
+#         _apply_no_grad_wrappers(transformer_layers, qset, kset, vset)
+#
+#     model.gradient_checkpointing_enable()
+#     return model, tok
