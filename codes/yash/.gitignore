@@ -1,0 +1,11 @@
+*/finetuned_model/
+*/full_finetuned_model_sample/
+*/logs/
+*/Lora_finetune_weights/*
+*/wandb/
+python-version.
+__pycache__/
+*.pyc
+.vscode/
+./wandb
+./FinDataset/data/*
