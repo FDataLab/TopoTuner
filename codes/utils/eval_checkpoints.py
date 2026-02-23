@@ -214,13 +214,17 @@ def main():
             if args.dataset in ["hotpotqa", "squad"]:
                 em_value = r.get("em", 0.0)
                 f1_value = r.get("f1", 0.0)
-                em_pct = em_value * 100.0 if em_value <= 1.0 else em_value
-                f1_pct = f1_value * 100.0 if f1_value <= 1.0 else f1_value
+                # Convert to canonical fraction format (0-1) for CSV storage
+                em_frac = em_value / 100.0 if em_value > 1.0 else em_value
+                f1_frac = f1_value / 100.0 if f1_value > 1.0 else f1_value
+                # Calculate percentages for display
+                em_pct = em_frac * 100.0
+                f1_pct = f1_frac * 100.0
 
                 results.append({
                     "checkpoint": subdir,
-                    "em": em_pct,
-                    "f1": f1_pct,
+                    "em": em_frac,  # Store as fraction (0-1)
+                    "f1": f1_frac,   # Store as fraction (0-1)
                     "n": r.get("n", r.get("total", 0)),
                     "time_seconds": round(elapsed_time, 2),
                     "time_minutes": round(elapsed_time / 60, 2),

@@ -16,10 +16,9 @@ from codes.hotpotqa.data_preprocessing_hotpotqa import (
 SQUAD_SYSTEM_PROMPT = """You are a reading comprehension assistant. Use the provided context to answer the question.
 
 Rules:
-- Show brief, step-by-step reasoning when needed.
-- End with a single final short answer.
-- Output the final line in this exact format:
-  Answer: [SHORT_ANSWER]
+- Output ONLY the final answer. No explanation.
+- Output a single line in this exact format:
+  Answer:
 """
 
 def build_prompt(tokenizer, question: str, context: str | None, prompt_format: str, use_instruction: bool = True) -> str:
@@ -36,7 +35,7 @@ def build_prompt(tokenizer, question: str, context: str | None, prompt_format: s
 def preprocess_dataset(
     example,
     tokenizer,
-    max_len: int = 1024,
+    max_len: int = 512,  # SQuAD max is ~517 tokens, 512 will truncate ~0.1% of longest examples
     use_instruction: bool = True,
     prompt_format: str = "llama3",
     is_train: bool = True,

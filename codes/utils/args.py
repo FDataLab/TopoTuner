@@ -27,9 +27,36 @@ def parse_args():
         default=[],
         help="List of transformer layer indices to freeze (e.g., --freeze-layers 7 11)"
     )
+    # ===== PROFESSOR'S VERSION (ACTIVE) =====
     parser.add_argument("--freeze-q-layers", nargs="*", type=int, default=[], help="Freeze ONLY q_proj in these layer idxs")
     parser.add_argument("--freeze-k-layers", nargs="*", type=int, default=[], help="Freeze ONLY k_proj in these layer idxs")
     parser.add_argument("--freeze-v-layers", nargs="*", type=int, default=[], help="Freeze ONLY v_proj in these layer idxs")
+    # ❌ REMOVED: --freeze-qkv-no-grad (blocks gradient flow to K/MLP)
+    # ❌ REMOVED: --freeze-mlp-no-grad (blocks gradient flow)
+    # Use ONLY requires_grad=False for freezing (keeps autograd graph intact)
+    parser.add_argument(
+        "--freeze-o-with-qkv",
+        action="store_true",
+        help="Also freeze o_proj in any layer frozen via --freeze-q-layers / --freeze-k-layers / --freeze-v-layers (enables K+O, Q+O, V+O experiments)"
+    )
+    parser.add_argument(
+        "--freeze-mlp",
+        action="store_true",
+        help="Also freeze MLP (gate_proj, up_proj, down_proj) in any layer frozen via --freeze-q-layers / --freeze-k-layers / --freeze-v-layers (enables K+O+MLP, Q+O+MLP, V+O+MLP experiments)"
+    )
+    parser.add_argument(
+        "--freeze-mlp-layers",
+        nargs="*",
+        type=int,
+        default=[],
+        help="Layer indices whose MLP blocks (gate_proj, up_proj, down_proj) should be frozen"
+    )
+    
+    # ===== KADIR'S VERSION (COMMENTED OUT - PRESERVED FOR REFERENCE) =====
+    # parser.add_argument("--freeze-q-layers", nargs="*", type=int, default=[], help="Freeze q_proj + o_proj in these layer idxs (optionally + MLP if --freeze-mlp)")
+    # parser.add_argument("--freeze-k-layers", nargs="*", type=int, default=[], help="Freeze k_proj + o_proj in these layer idxs (optionally + MLP if --freeze-mlp)")
+    # parser.add_argument("--freeze-v-layers", nargs="*", type=int, default=[], help="Freeze v_proj + o_proj in these layer idxs (optionally + MLP if --freeze-mlp)")
+    # parser.add_argument("--freeze-mlp", action="store_true", help="Also freeze MLP (gate_proj, up_proj, down_proj) along with projections when using --freeze-q/k/v-layers")
 
     parser.add_argument(
         "--hotpot-evidence",
@@ -42,5 +69,10 @@ def parse_args():
         "--debug-hotpot",
         action="store_true",
         help="HotpotQA only: print one decoded tokenized sample ..."
+    )
+    parser.add_argument(
+        "--enable-timing",
+        action="store_true",
+        help="Enable detailed timing measurements for each phase (model loading, tokenization, training, etc.)"
     )
     return parser.parse_args()
