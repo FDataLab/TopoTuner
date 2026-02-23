@@ -1,344 +1,315 @@
-import os
-import csv
+"""
+GSM8K 8-shot Chain-of-Thought Evaluation
+
+Matches the lm-evaluation-harness gsm8k_cot methodology so our results
+are directly comparable to published paper scores.
+
+Key details:
+  - 8 fixed few-shot examples (Chain-of-Thought reasoning demos)
+  - Greedy decoding (do_sample=False)
+  - Exact match on extracted numerical answers
+  - Left-padded batched inference for GPU efficiency
+
+Usage:
+  python eval_gsm8k.py --model meta-llama/Llama-3.1-8B
+  python eval_gsm8k.py --model ./gsm8k-lora-finetuned --batch-size 128
+  python eval_gsm8k.py --model ./gsm8k-full-finetuned --verbose
+"""
+
+import argparse
 import json
-import time
+import os
 import re
-from typing import Optional, Dict
+import time
 
 import torch
 from datasets import load_dataset
-from transformers import PreTrainedModel, PreTrainedTokenizerBase, StoppingCriteria, StoppingCriteriaList
-from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-class QStoppingCriteria(StoppingCriteria):
-    def __init__(self, tokenizer):
-        self.tokenizer = tokenizer
-        # Stop when we see "Q:" (new question)
-        self.stop_tokens = [
-            tokenizer.encode("Q:", add_special_tokens=False)[0],
-            tokenizer.encode("\nQ:", add_special_tokens=False)[0],
-        ]
-    
-    def __call__(self, input_ids, scores, **kwargs) -> bool:
-        # Check if the last token is a stop token
-        if len(input_ids) > 0:
-            last_token = input_ids[0, -1].item()
-            if last_token in self.stop_tokens:
-                return True
-        return False
 
-from .data_preprocessing_gsm8k import (
-    infer_prompt_format_from_model_id,
-    eos_for_model,
-    create_prompt_llama3,
-    create_prompt_llama2,
-    create_prompt_mistral,
-    create_prompt_qwen,
-    create_prompt_olmo,
-    DEFAULT_SYSTEM_PROMPT,
-)
+def log(msg=""):
+    print(msg, flush=True)
 
-def _get_gpu_info():
-    if not torch.cuda.is_available():
-        return {"gpu": None, "gpu_mem_alloc": None, "gpu_mem_reserved": None}
-    gpu_id = torch.cuda.current_device()
-    props = torch.cuda.get_device_properties(gpu_id)
-    return {
-        "gpu": props.name,
-        "gpu_id": gpu_id,
-        "gpu_mem_alloc": torch.cuda.memory_allocated(gpu_id) // 1024**2,
-        "gpu_mem_reserved": torch.cuda.memory_reserved(gpu_id) // 1024**2,
-    }
 
-def _append_jsonl(path: str, obj: dict) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+# ──────────────────────────────────────────────
+#  Official 8-shot examples (lm-eval-harness)
+# ──────────────────────────────────────────────
 
-def _append_tsv(path: str, row: dict, field_order: list) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    new_file = not os.path.exists(path)
-    with open(path, "a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=field_order, delimiter="\t")
-        if new_file:
-            w.writeheader()
-        w.writerow({k: row.get(k) for k in field_order})
-
-def normalize_number(s):
-    if s is None:
-        return None
-    s = s.strip().replace(",", "").replace("$", "")
-    try:
-        if "." in s:
-            return float(s)
-        return int(s)
-    except ValueError:
-        return None
-
-def extract_final_answer(text):
-    """Extract final answer using EleutherAI standard method."""
-    # Method 1: Look for "The answer is X" pattern (EleutherAI standard) - HIGHEST PRIORITY
-    # Find ALL occurrences and take the LAST one (most recent)
-    matches = re.findall(r"The answer is (\-?[0-9\.\,\$]+)", text)
-    if matches:
-        return normalize_number(matches[-1])  # Take the last occurrence
-    
-    # Method 2: Look for <final-answer> ... </final-answer>
-    m = re.search(r"<final-answer>\s*([0-9.,]+)\s*</final-answer>", text)
-    if m:
-        return normalize_number(m.group(1))
-    
-    # Method 3: Look for #### format (GSM8K standard) - but handle comma-separated lists
-    m = re.search(r"####\s*([0-9.,]+)", text)
-    if m:
-        answer_text = m.group(1)
-        # If it's a comma-separated list, take the last number
-        if ',' in answer_text:
-            numbers = [n.strip() for n in answer_text.split(',')]
-            # Take the last valid number
-            for num in reversed(numbers):
-                if num.isdigit():
-                    return normalize_number(num)
-        return normalize_number(answer_text)
-    
-    # Method 4: Flexible extract (last number) - LOWEST PRIORITY
-    nums = re.findall(r"(-?[$0-9.,]{2,})|(-?[0-9]+)", text)
-    if nums:
-        # Take the last valid number
-        for num_tuple in reversed(nums):
-            for num in num_tuple:
-                if num and num.strip():
-                    return normalize_number(num.strip())
-    
-    return None
-
-# Few-shot examples from EleutherAI lm-evaluation-harness
-FEWSHOT_EXAMPLES = [
-    {
-        "question": "There are 15 trees in the grove. Grove workers will plant trees in the grove today. After they are done, there will be 21 trees. How many trees did the grove workers plant today?",
-        "answer": "There are 15 trees originally. Then there were 21 trees after some more were planted. So there must have been 21 - 15 = 6. The answer is 6."
-    },
-    {
-        "question": "If there are 3 cars in the parking lot and 2 more cars arrive, how many cars are in the parking lot?",
-        "answer": "There are originally 3 cars. 2 more cars arrive. 3 + 2 = 5. The answer is 5."
-    },
-    {
-        "question": "Leah had 32 chocolates and her sister had 42. If they ate 35, how many pieces do they have left in total?",
-        "answer": "Originally, Leah had 32 chocolates. Her sister had 42. So in total they had 32 + 42 = 74. After eating 35, they had 74 - 35 = 39. The answer is 39."
-    },
-    {
-        "question": "Jason had 20 lollipops. He gave Denny some lollipops. Now Jason has 12 lollipops. How many lollipops did Jason give to Denny?",
-        "answer": "Jason started with 20 lollipops. Then he had 12 after giving some to Denny. So he gave Denny 20 - 12 = 8. The answer is 8."
-    },
-    {
-        "question": "Shawn has five toys. For Christmas, he got two toys each from his mom and dad. How many toys does he have now?",
-        "answer": "Shawn started with 5 toys. If he got 2 toys each from his mom and dad, then that is 4 more toys. 5 + 4 = 9. The answer is 9."
-    },
-    {
-        "question": "There were nine computers in the server room. Five more computers were installed each day, from monday to thursday. How many computers are now in the server room?",
-        "answer": "There were originally 9 computers. For each of 4 days, 5 more computers were added. So 5 * 4 = 20 computers were added. 9 + 20 is 29. The answer is 29."
-    },
-    {
-        "question": "Michael had 58 golf balls. On tuesday, he lost 23 golf balls. On wednesday, he lost 2 more. How many golf balls did he have at the end of wednesday?",
-        "answer": "Michael started with 58 golf balls. After losing 23 on tuesday, he had 58 - 23 = 35. After losing 2 more, he had 35 - 2 = 33 golf balls. The answer is 33."
-    },
-    {
-        "question": "Olivia has $23. She bought five bagels for $3 each. How much money does she have left?",
-        "answer": "Olivia had 23 dollars. 5 bagels for 3 dollars each will be 5 x 3 = 15 dollars. So she has 23 - 15 dollars left. 23 - 15 is 8. The answer is 8."
-    }
+FEW_SHOT_EXAMPLES = [
+    ("There are 15 trees in the grove. Grove workers will plant trees in the grove today. After they are done, there will be 21 trees. How many trees did the grove workers plant today?",
+     "There are 15 trees originally. Then there were 21 trees after some more were planted. So there must have been 21 - 15 = 6. The answer is 6."),
+    ("If there are 3 cars in the parking lot and 2 more cars arrive, how many cars are in the parking lot?",
+     "There are originally 3 cars. 2 more cars arrive. 3 + 2 = 5. The answer is 5."),
+    ("Leah had 32 chocolates and her sister had 42. If they ate 35, how many pieces do they have left in total?",
+     "Originally, Leah had 32 chocolates. Her sister had 42. So in total they had 32 + 42 = 74. After eating 35, they had 74 - 35 = 39. The answer is 39."),
+    ("Jason had 20 lollipops. He gave Denny some lollipops. Now Jason has 12 lollipops. How many lollipops did Jason give to Denny?",
+     "Jason started with 20 lollipops. Then he had 12 after giving some to Denny. So he gave Denny 20 - 12 = 8. The answer is 8."),
+    ("Shawn has five toys. For Christmas, he got two toys each from his mom and dad. How many toys does he have now?",
+     "Shawn started with 5 toys. If he got 2 toys each from his mom and dad, then that is 4 more toys. 5 + 4 = 9. The answer is 9."),
+    ("There were nine computers in the server room. Five more computers were installed each day, from monday to thursday. How many computers are now in the server room?",
+     "There were originally 9 computers. For each of 4 days, 5 more computers were added. So 5 * 4 = 20 computers were added. 9 + 20 is 29. The answer is 29."),
+    ("Michael had 58 golf balls. On tuesday, he lost 23 golf balls. On wednesday, he lost 2 more. How many golf balls did he have at the end of wednesday?",
+     "Michael started with 58 golf balls. After losing 23 on tuesday, he had 58 - 23 = 35. After losing 2 more, he had 35 - 2 = 33 golf balls. The answer is 33."),
+    ("Olivia has $23. She bought five bagels for $3 each. How much money does she have left?",
+     "Olivia had 23 dollars. 5 bagels for 3 dollars each will be 5 x 3 = 15 dollars. So she has 23 - 15 dollars left. 23 - 15 is 8. The answer is 8."),
 ]
 
-def build_fewshot_prompt(question, num_examples=5):
-    """Build few-shot prompt using EleutherAI examples."""
+
+# ──────────────────────────────────────────────
+#  Answer extraction
+# ──────────────────────────────────────────────
+
+def extract_answer(text: str):
+    """Extract the numerical answer from model-generated text.
+
+    Two strategies (in priority order):
+      1. Strict: Look for "The answer is X" — the pattern few-shot examples teach
+      2. Fallback: Take the last number in the text
+
+    The strict approach works when the model follows the CoT format properly.
+    The fallback catches cases where the model gives the right number but
+    doesn't follow the exact template.
+    """
+    # Strict
+    match = re.findall(r'[Tt]he answer is\s*\$?\s*(-?[\d,]+\.?\d*)', text)
+    if match:
+        return match[-1].replace(',', '').strip()
+    # Flexible: last number
+    numbers = re.findall(r'(-?\d[\d,]*\.?\d*)', text)
+    if numbers:
+        return numbers[-1].replace(',', '').strip()
+    return None
+
+
+def extract_gold(answer_text: str):
+    """Extract gold answer from GSM8K '#### X' format."""
+    if '####' in answer_text:
+        return answer_text.split('####')[-1].strip().replace(',', '')
+    return None
+
+
+def normalize(s):
+    """Normalize for comparison: strip whitespace, commas, $, trailing period."""
+    if s is None:
+        return None
+    return s.strip().replace(',', '').replace('$', '').rstrip('.')
+
+
+# ──────────────────────────────────────────────
+#  Prompt
+# ──────────────────────────────────────────────
+
+def build_prompt(question):
+    """Build the 8-shot Chain-of-Thought prompt.
+
+    Format: Q: {question}\nA: {step-by-step answer}\n\n  (repeated 8 times)
+    Then:   Q: {new question}\nA:  (model completes this)
+
+    The 8 examples teach the model to:
+      1. Show step-by-step reasoning
+      2. End with "The answer is X."
+    """
     prompt = ""
-    
-    # Add few-shot examples
-    for i in range(min(num_examples, len(FEWSHOT_EXAMPLES))):
-        example = FEWSHOT_EXAMPLES[i]
-        prompt += f"Q: {example['question']}\n\nA: {example['answer']}\n\n"
-    
-    # Add the current question
-    prompt += f"Q: {question}\n\nA:"
-    
+    for q, a in FEW_SHOT_EXAMPLES:
+        prompt += f"Q: {q}\nA: {a}\n\n"
+    prompt += f"Q: {question}\nA:"
     return prompt
 
-@torch.no_grad()
-def evaluate_gsm8k(
-    model: PreTrainedModel,
-    tokenizer: PreTrainedTokenizerBase,
-    split: str = "test",
-    limit: Optional[int] = None,
-    max_new_tokens: int = 256,
-    batch_size: int = 32,
-    *,
-    progress_bar: bool = True,
-    save_jsonl: Optional[str] = None,
-    save_tsv: Optional[str] = None,
-    run_name: str = "",
-    phase: str = "adhoc",
-    epoch: int = -1,
-    step: int = -1,
-    output_dir: str = "",
-    debug_print: bool = False,
-    use_fewshot: bool = True,
-    num_fewshot_examples: int = 5,
-) -> Dict[str, float]:
+
+# ──────────────────────────────────────────────
+#  Evaluation
+# ──────────────────────────────────────────────
+
+def evaluate(model, tokenizer, test_data, batch_size, max_new_tokens, verbose=False):
+    """Run batched evaluation on GSM8K test set.
+
+    How batched generation works:
+      1. All prompts in a batch are LEFT-PADDED to the same length
+         (left-padding so the actual content ends at the right edge,
+          and the model generates new tokens to the right)
+      2. Model generates up to max_new_tokens for all prompts simultaneously
+      3. We extract only the GENERATED tokens (after the input) for each sample
+      4. Truncate at "Q:" to stop at the next question boundary
+      5. Extract and compare the numerical answer
     """
-    Evaluate GSM8K by extracting <final-answer> tags.
-    """
-    start_time = time.time()
-    
-    # Load GSM8K dataset
-    ds = load_dataset("openai/gsm8k", "main")[split]
-    
-    # Apply limit if specified
-    if limit is not None:
-        ds = ds.select(range(min(limit, len(ds))))
-    
-    n_total = len(ds)
     correct = 0
+    total = 0
+    results = []
+    t_start = time.time()
 
-    model_id = getattr(model, "name_or_path", None) or getattr(model.config, "_name_or_path", "")
-    prompt_format = infer_prompt_format_from_model_id(str(model_id))
-    eos_id = eos_for_model(tokenizer, str(model_id))
+    all_prompts = [build_prompt(ex['question']) for ex in test_data]
+    all_examples = list(test_data)
+    num_batches = (len(all_prompts) + batch_size - 1) // batch_size
 
-    # Ensure pad token is set (some tokenizers lack it)
-    if getattr(tokenizer, "pad_token", None) is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.pad_token_id = tokenizer.eos_token_id
+    log(f"  {len(all_prompts)} samples, {num_batches} batches (bs={batch_size})")
 
-    # Set padding side to left for generation
-    tokenizer.padding_side = "left"
-    
-    prev_cache = getattr(model.config, "use_cache", True)
-    model.config.use_cache = True
-    model.eval()
+    if verbose:
+        # Show 1 full prompt so user can verify format
+        log(f"\n{'─'*60}")
+        log(f"  SAMPLE PROMPT (first test question):")
+        log(f"{'─'*60}")
+        log(all_prompts[0])
+        log(f"{'─'*60}\n")
 
-    print(f"[Eval][GSM8K] split={split} n={n_total} batch_size={batch_size}", flush=True)
+    for batch_idx in range(num_batches):
+        bs = batch_idx * batch_size
+        be = min(bs + batch_size, len(all_prompts))
+        batch_prompts = all_prompts[bs:be]
+        batch_examples = all_examples[bs:be]
 
-    # Process in batches
-    num_batches = (n_total + batch_size - 1) // batch_size
-    
-    for batch_idx in tqdm(range(num_batches), disable=not progress_bar, desc="Processing batches"):
-        start_idx = batch_idx * batch_size
-        end_idx = min(start_idx + batch_size, n_total)
-        batch_ds = ds.select(range(start_idx, end_idx))
-        
-        # Prepare batch prompts
-        batch_prompts = []
-        batch_gold_answers = []
-        
-        for ex in batch_ds:
-            question = ex["question"]
-            answer_raw = ex["answer"]
-            
-            # Extract ground-truth final numeric answer (#### N)
-            gt_match = re.search(r"####\s*([0-9.,]+)", answer_raw)
-            gt_final = normalize_number(gt_match.group(1)) if gt_match else None
-            
-            if use_fewshot:
-                prompt = build_fewshot_prompt(question, num_fewshot_examples)
-            else:
-                prompt = f"Question: {question}\nAnswer:"
-            batch_prompts.append(prompt)
-            batch_gold_answers.append(gt_final)
-
-        if not batch_prompts:
-            continue
-
-        # Tokenize batch
         inputs = tokenizer(
-            batch_prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=2048
+            batch_prompts, return_tensors="pt",
+            padding=True, truncation=True, max_length=4096,
         ).to(model.device)
 
-        # Generate responses using EleutherAI standard parameters with stopping criteria
-        stopping_criteria = StoppingCriteriaList([QStoppingCriteria(tokenizer)])
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,  # EleutherAI uses deterministic generation
-            temperature=0.0,  # EleutherAI uses temperature 0.0
-            pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=eos_id,
-            stopping_criteria=stopping_criteria,
-        )
+        input_len = inputs['input_ids'].shape[1]
 
-        # Decode responses
-        preds_full = tokenizer.batch_decode(outputs, skip_special_tokens=False)
-        
-        # Process each example in the batch
-        for i, (prompt, gt_final, pred_full) in enumerate(zip(batch_prompts, batch_gold_answers, preds_full)):
-            # Extract prediction
-            pred_extracted = extract_final_answer(pred_full)
-            
-            # Check if correct
-            is_correct = pred_extracted is not None and gt_final is not None and pred_extracted == gt_final
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+
+        for j in range(len(batch_prompts)):
+            idx = bs + j
+            example = batch_examples[j]
+
+            # Generated tokens start after the full padded input (same for all in batch)
+            gen_ids = outputs[j][input_len:]
+            gen_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+
+            # Truncate at "Q:" (stop at next question)
+            for stop in ["\nQ:", "Q:"]:
+                si = gen_text.find(stop)
+                if si != -1:
+                    gen_text = gen_text[:si]
+                    break
+
+            gold = normalize(extract_gold(example['answer']))
+            pred = normalize(extract_answer(gen_text))
+            is_correct = gold is not None and pred is not None and gold == pred
+
             if is_correct:
                 correct += 1
-            
-            # Debug print for first few examples
-            if debug_print and batch_idx < 2 and i < 3:
-                print("="*70)
-                print(f"Q: {batch_ds[i]['question']}")
-                print(f"GT raw: {batch_ds[i]['answer']}")
-                print(f"GT (final): {gt_final}")
-                print(f"Pred (full): {pred_full}")
-                print(f"Pred (extracted): {pred_extracted}")
-                print(f"Compare → pred={pred_extracted} vs gt={gt_final} → {'✓' if is_correct else '✗'}")
+            total += 1
 
-    # Calculate accuracy
-    accuracy = correct / n_total * 100 if n_total > 0 else 0.0
-    
-    # Prepare results
-    results = {
-        "accuracy": accuracy,
-        "correct": correct,
-        "total": n_total,
-        "em": accuracy,  # For compatibility with existing code
-        "n": n_total,    # For compatibility with existing code
+            results.append({
+                'idx': idx,
+                'question': example['question'],
+                'gold': gold,
+                'predicted': pred,
+                'correct': is_correct,
+                'generated': gen_text.strip(),
+            })
+
+            if verbose:
+                mark = "✓" if is_correct else "✗"
+                log(f"  [{idx:4d}] {mark}  gold={gold}  pred={pred}")
+                if not is_correct:
+                    log(f"         Q: {example['question'][:120]}...")
+                    log(f"         Gen: {gen_text.strip()[:200]}...")
+
+        elapsed = time.time() - t_start
+        sps = total / elapsed if elapsed > 0 else 0
+        eta = (len(all_prompts) - total) / sps / 60 if sps > 0 else 0
+        log(f"  [{total:4d}/{len(all_prompts)}] "
+            f"{correct/total*100:.1f}% ({correct}/{total}) | "
+            f"{sps:.1f} s/s | ETA {eta:.1f}m")
+
+    return correct / total if total > 0 else 0.0, results
+
+
+# ──────────────────────────────────────────────
+#  Main
+# ──────────────────────────────────────────────
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--model", required=True)
+    p.add_argument("--output-dir", default="results")
+    p.add_argument("--max-samples", type=int, default=None)
+    p.add_argument("--max-new-tokens", type=int, default=512)
+    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--verbose", action="store_true",
+                   help="Print per-sample results")
+    args = p.parse_args()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    log(f"Device: {device}")
+    if device == "cuda":
+        log(f"GPU: {torch.cuda.get_device_name(0)}")
+        log(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+
+    log(f"\nLoading model: {args.model}")
+    t0 = time.time()
+
+    is_peft = os.path.exists(os.path.join(args.model, "adapter_config.json"))
+    if is_peft:
+        from peft import PeftModel
+        with open(os.path.join(args.model, "adapter_config.json")) as f:
+            cfg = json.load(f)
+        base_id = cfg["base_model_name_or_path"]
+        log(f"  LoRA adapter, base: {base_id}")
+        tokenizer = AutoTokenizer.from_pretrained(base_id)
+        base = AutoModelForCausalLM.from_pretrained(
+            base_id, torch_dtype=torch.bfloat16, device_map="auto")
+        model = PeftModel.from_pretrained(base, args.model)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.model)
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model, torch_dtype=torch.bfloat16, device_map="auto")
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+    model.eval()
+    load_time = time.time() - t0
+    log(f"Loaded in {load_time:.1f}s")
+
+    log("Loading GSM8K...")
+    dataset = load_dataset("openai/gsm8k", "main")
+    test_data = dataset['test']
+    if args.max_samples:
+        test_data = test_data.select(range(min(args.max_samples, len(test_data))))
+
+    log(f"Test: {len(test_data)} | Batch: {args.batch_size} | "
+        f"MaxTok: {args.max_new_tokens}")
+    log()
+
+    t_eval = time.time()
+    acc, results = evaluate(
+        model, tokenizer, test_data,
+        args.batch_size, args.max_new_tokens,
+        verbose=args.verbose)
+    eval_time = time.time() - t_eval
+
+    n_correct = sum(1 for r in results if r['correct'])
+    log(f"\n{'='*50}")
+    log(f"  GSM8K  |  {acc*100:.1f}%  ({n_correct}/{len(results)})")
+    log(f"  Model: {args.model}")
+    log(f"  Time:  {eval_time:.1f}s  ({len(results)/eval_time:.1f} samples/s)")
+    log(f"{'='*50}\n")
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    model_short = args.model.replace("/", "_").replace(".", "-")
+    out_path = os.path.join(args.output_dir, f"gsm8k_{model_short}.json")
+
+    output = {
+        "model": args.model,
+        "benchmark": "gsm8k",
+        "setting": "8-shot CoT, greedy",
+        "accuracy": round(acc, 4),
+        "correct": n_correct,
+        "total": len(results),
+        "eval_time_s": round(eval_time, 1),
+        "samples": results,
     }
-    
-    # Logging
-    gpu_info = _get_gpu_info()
-    elapsed_time = time.time() - start_time
-    
-    log_record = {
-        "dataset": "gsm8k",
-        "split": split,
-        "run_name": run_name,
-        "phase": phase,
-        "epoch": epoch,
-        "step": step,
-        "model_id": str(model_id),
-        "accuracy": accuracy,
-        "correct": correct,
-        "total": n_total,
-        "batch_size": batch_size,
-        "max_new_tokens": max_new_tokens,
-        "elapsed_time": elapsed_time,
-        "output_dir": output_dir,
-        **gpu_info
-    }
-    
-    print(f"[Eval][GSM8K] Accuracy: {accuracy:.2f}% ({correct}/{n_total}) "
-          f"Time: {elapsed_time:.1f}s GPU: {gpu_info['gpu']}", flush=True)
-    
-    # Save logs if requested
-    if save_jsonl:
-        _append_jsonl(save_jsonl, log_record)
-    
-    if save_tsv:
-        field_order = ["dataset", "split", "run_name", "phase", "epoch", "step", 
-                      "model_id", "accuracy", "correct", "total", "batch_size", 
-                      "max_new_tokens", "elapsed_time", "output_dir", 
-                      "gpu", "gpu_id", "gpu_mem_alloc", "gpu_mem_reserved"]
-        _append_tsv(save_tsv, log_record, field_order)
-    
-    # Restore model state
-    model.config.use_cache = prev_cache
-    
-    return results
+    with open(out_path, "w") as f:
+        json.dump(output, f, indent=2)
+    log(f"Saved: {out_path}")
+
+
+if __name__ == "__main__":
+    main()
