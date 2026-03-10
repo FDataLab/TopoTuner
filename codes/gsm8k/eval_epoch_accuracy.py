@@ -143,24 +143,42 @@ def find_checkpoints(plan, runs, base_dir="."):
             print(f"  WARNING: {run_dir} not found, skipping", flush=True)
             continue
 
-        checkpoints = []
-        for ckpt_dir in sorted(glob.glob(os.path.join(run_dir, "checkpoint-*"))):
-            step = int(ckpt_dir.split("-")[-1])
-            # steps_per_epoch = 468 for our setup (7473 / 16)
-            # Detect from the checkpoint steps
-            checkpoints.append((step, ckpt_dir))
-
+        checkpoints = _discover_epoch_checkpoints(run_dir)
         if checkpoints:
-            # Sort by step, assign epoch numbers
-            checkpoints.sort(key=lambda x: x[0])
-            step_gap = checkpoints[0][0]  # first checkpoint = 1 epoch
-            epoch_checkpoints = []
-            for step, path in checkpoints:
-                epoch = step // step_gap
-                epoch_checkpoints.append((epoch, path))
-            result[run] = epoch_checkpoints
+            result[run] = checkpoints
 
     return result
+
+
+def find_checkpoints_by_dirs(run_dirs):
+    """Find epoch checkpoints from explicit directory list.
+
+    Returns dict: {run_idx: [(epoch, checkpoint_path), ...]}
+    """
+    result = {}
+    for idx, run_dir in enumerate(run_dirs, start=1):
+        if not os.path.isdir(run_dir):
+            print(f"  WARNING: {run_dir} not found, skipping", flush=True)
+            continue
+        checkpoints = _discover_epoch_checkpoints(run_dir)
+        if checkpoints:
+            result[idx] = checkpoints
+    return result
+
+
+def _discover_epoch_checkpoints(run_dir):
+    """Discover checkpoint-* dirs and assign epoch numbers."""
+    checkpoints = []
+    for ckpt_dir in sorted(glob.glob(os.path.join(run_dir, "checkpoint-*"))):
+        step = int(ckpt_dir.split("-")[-1])
+        checkpoints.append((step, ckpt_dir))
+
+    if not checkpoints:
+        return []
+
+    checkpoints.sort(key=lambda x: x[0])
+    step_gap = checkpoints[0][0]
+    return [(step // step_gap, path) for step, path in checkpoints]
 
 
 # ── Main ──────────────────────────────────────────────────────────
@@ -176,6 +194,8 @@ def main():
     parser.add_argument("--base-dir", type=str, default=".")
     parser.add_argument("--base-model", type=str, default="meta-llama/Llama-3.1-8B",
                         help="Base model for tokenizer (checkpoints don't save tokenizer)")
+    parser.add_argument("--custom-dirs", nargs="+", default=None,
+                        help="Custom run directories (overrides --plans). Format: label:dir1,dir2,...")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -193,17 +213,29 @@ def main():
         test_data = test_data.select(range(min(args.max_samples, len(test_data))))
     print(f"  {len(test_data)} test samples\n", flush=True)
 
-    # Collect all results: {plan: {epoch: [acc_run1, acc_run2, ...]}}
+    # Collect all results: {label: {epoch: [acc_run1, acc_run2, ...]}}
     all_results = {}
 
-    for plan in args.plans:
+    # Build experiment list: [(label, ckpt_map), ...]
+    experiments = []
+    if args.custom_dirs:
+        for entry in args.custom_dirs:
+            label, dirs_str = entry.split(":", 1)
+            dirs = dirs_str.split(",")
+            ckpt_map = find_checkpoints_by_dirs(dirs)
+            experiments.append((label, ckpt_map))
+    else:
+        for plan in args.plans:
+            ckpt_map = find_checkpoints(plan, args.runs, args.base_dir)
+            experiments.append((plan, ckpt_map))
+
+    for label, ckpt_map in experiments:
         print(f"\n{'='*60}", flush=True)
-        print(f"  PLAN {plan}", flush=True)
+        print(f"  {label}", flush=True)
         print(f"{'='*60}", flush=True)
 
-        ckpt_map = find_checkpoints(plan, args.runs, args.base_dir)
         if not ckpt_map:
-            print(f"  No checkpoints found for Plan {plan}", flush=True)
+            print(f"  No checkpoints found for {label}", flush=True)
             continue
 
         plan_results = {}
@@ -227,14 +259,12 @@ def main():
                     plan_results[epoch] = []
                 plan_results[epoch].append(acc)
 
-                # Free GPU memory
                 del model
                 torch.cuda.empty_cache()
 
-        all_results[plan] = plan_results
+        all_results[label] = plan_results
 
-        # Save intermediate results
-        save_path = os.path.join(args.output_dir, f"plan_{plan}_epoch_accuracy.json")
+        save_path = os.path.join(args.output_dir, f"{label}_epoch_accuracy.json")
         with open(save_path, "w") as f:
             json.dump({str(k): v for k, v in plan_results.items()}, f, indent=2)
         print(f"\n  Saved: {save_path}", flush=True)
@@ -255,7 +285,11 @@ def main():
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    for plan, plan_results in all_results.items():
+    default_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
+                      '#9467bd', '#8c564b', '#e377c2', '#7f7f7f',
+                      '#bcbd22', '#17becf']
+
+    for idx, (label, plan_results) in enumerate(all_results.items()):
         if not plan_results:
             continue
 
@@ -263,10 +297,10 @@ def main():
         means = [np.mean(plan_results[e]) * 100 for e in epochs]
         stds = [np.std(plan_results[e]) * 100 if len(plan_results[e]) > 1 else 0 for e in epochs]
 
-        label = plan_labels.get(plan, f"Plan {plan}")
-        color = colors.get(plan, None)
+        display = plan_labels.get(label, label)
+        color = colors.get(label, default_colors[idx % len(default_colors)])
 
-        ax.plot(epochs, means, 'o-', label=label, color=color, linewidth=2, markersize=6)
+        ax.plot(epochs, means, 'o-', label=display, color=color, linewidth=2, markersize=6)
         if any(s > 0 for s in stds):
             ax.fill_between(epochs,
                             [m - s for m, s in zip(means, stds)],
@@ -294,13 +328,10 @@ def main():
     print(f"\n{'='*60}", flush=True)
     print(f"  SUMMARY (mean accuracy %)", flush=True)
     print(f"{'='*60}", flush=True)
-    header = f"{'Plan':<8}" + "".join(f"{'Ep'+str(e):>8}" for e in range(1, 7))
+    header = f"{'Experiment':<25}" + "".join(f"{'Ep'+str(e):>8}" for e in range(1, 7))
     print(f"  {header}", flush=True)
-    for plan in args.plans:
-        if plan not in all_results:
-            continue
-        pr = all_results[plan]
-        row = f"  {plan:<8}"
+    for label, pr in all_results.items():
+        row = f"  {label:<25}"
         for e in range(1, 7):
             if e in pr:
                 row += f"{np.mean(pr[e])*100:>7.1f}%"
