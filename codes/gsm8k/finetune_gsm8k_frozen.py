@@ -118,6 +118,710 @@ def apply_freezing(model, plan, trainable_layers=None):
     return unfrozen_params, total_params
 
 
+def apply_selective_vo_freezing(model, v_frozen_layers, o_frozen_layers):
+    """Selective V/O freezing: K+Q+MLP frozen everywhere; V and O frozen only in specified layers.
+
+    v_frozen_layers: list of layer indices where v_proj is frozen
+    o_frozen_layers: list of layer indices where o_proj is frozen
+    """
+    v_frozen = set(v_frozen_layers)
+    o_frozen = set(o_frozen_layers)
+
+    for p in model.parameters():
+        p.requires_grad = False
+
+    unfrozen_count = 0
+    unfrozen_params = 0
+    for name, p in model.named_parameters():
+        if "layers." not in name:
+            continue
+        # Parse layer index
+        try:
+            layer_idx = int(name.split(".layers.")[1].split(".")[0])
+        except (IndexError, ValueError):
+            continue
+        if ".v_proj." in name and layer_idx not in v_frozen:
+            p.requires_grad = True
+            unfrozen_count += 1
+            unfrozen_params += p.numel()
+        elif ".o_proj." in name and layer_idx not in o_frozen:
+            p.requires_grad = True
+            unfrozen_count += 1
+            unfrozen_params += p.numel()
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\n  Selective V/O freezing:", flush=True)
+    print(f"  K + Q + MLP: frozen in all 32 layers", flush=True)
+    print(f"  V frozen layers: {sorted(v_frozen)}  ({len(v_frozen)} frozen, {32 - len(v_frozen)} trainable)", flush=True)
+    print(f"  O frozen layers: {sorted(o_frozen)}  ({len(o_frozen)} frozen, {32 - len(o_frozen)} trainable)", flush=True)
+    print(f"  Unfroze {unfrozen_count} tensors ({unfrozen_params:,} params, "
+          f"{unfrozen_params/total_params*100:.2f}%)", flush=True)
+
+    for i in range(32):
+        layer_trainable = []
+        for name, p in model.named_parameters():
+            if f".layers.{i}." in name and p.requires_grad:
+                layer_trainable.append(name.split(".")[-2])
+        if layer_trainable:
+            print(f"    Layer {i:2d}: {', '.join(sorted(set(layer_trainable)))}", flush=True)
+
+    return unfrozen_params, total_params
+
+
+def apply_selective_vo_freezing(model, v_frozen_layers, o_frozen_layers):
+    """Selective V/O freezing: K+Q+MLP frozen everywhere; V and O frozen only in specified layers.
+
+    v_frozen_layers: list of layer indices where v_proj is frozen
+    o_frozen_layers: list of layer indices where o_proj is frozen
+    """
+    v_frozen = set(v_frozen_layers)
+    o_frozen = set(o_frozen_layers)
+
+    print(f"\n  Selective V/O freezing:", flush=True)
+    print(f"  K + Q + MLP: frozen in all 32 layers", flush=True)
+    print(f"  V frozen layers: {sorted(v_frozen)}  ({len(v_frozen)} frozen, {32 - len(v_frozen)} trainable)", flush=True)
+    print(f"  O frozen layers: {sorted(o_frozen)}  ({len(o_frozen)} frozen, {32 - len(o_frozen)} trainable)", flush=True)
+
+    for p in model.parameters():
+        p.requires_grad = False
+
+    unfrozen_count = 0
+    unfrozen_params = 0
+    for name, p in model.named_parameters():
+        if "v_proj" in name:
+            layer_idx = int(name.split(".layers.")[1].split(".")[0])
+            if layer_idx not in v_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        elif "o_proj" in name:
+            layer_idx = int(name.split(".layers.")[1].split(".")[0])
+            if layer_idx not in o_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"  Unfroze {unfrozen_count} tensors ({unfrozen_params:,} params, "
+          f"{unfrozen_params/total_params*100:.2f}%)", flush=True)
+
+    for i in range(32):
+        layer_trainable = []
+        for name, p in model.named_parameters():
+            if f".layers.{i}." in name and p.requires_grad:
+                layer_trainable.append(name.split(".")[-2])
+        if layer_trainable:
+            print(f"    Layer {i:2d}: {', '.join(sorted(set(layer_trainable)))}", flush=True)
+
+    return unfrozen_params, total_params
+
+
+def apply_selective_vo_freezing(model, v_frozen_layers, o_frozen_layers):
+    """Selective V/O freezing: K+Q+MLP frozen everywhere; V and O frozen only in specified layers.
+
+    v_frozen_layers: list of layer indices where v_proj is frozen
+    o_frozen_layers: list of layer indices where o_proj is frozen
+    """
+    v_frozen = set(v_frozen_layers)
+    o_frozen = set(o_frozen_layers)
+
+    for p in model.parameters():
+        p.requires_grad = False
+
+    unfrozen_count = 0
+    unfrozen_params = 0
+    for name, p in model.named_parameters():
+        if "layers." not in name:
+            continue
+        layer_idx = None
+        for i in range(32):
+            if f".layers.{i}." in name:
+                layer_idx = i
+                break
+        if layer_idx is None:
+            continue
+        if ".v_proj." in name:
+            if layer_idx not in v_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        elif ".o_proj." in name:
+            if layer_idx not in o_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        # K, Q, MLP stay frozen
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\n  Selective V/O freezing:", flush=True)
+    print(f"  K + Q + MLP: frozen in all 32 layers", flush=True)
+    print(f"  V frozen layers: {sorted(v_frozen)}  ({len(v_frozen)} frozen, {32 - len(v_frozen)} trainable)", flush=True)
+    print(f"  O frozen layers: {sorted(o_frozen)}  ({len(o_frozen)} frozen, {32 - len(o_frozen)} trainable)", flush=True)
+    print(f"  Unfroze {unfrozen_count} tensors ({unfrozen_params:,} params, "
+          f"{unfrozen_params/total_params*100:.2f}%)", flush=True)
+
+    for i in range(32):
+        layer_trainable = []
+        for name, p in model.named_parameters():
+            if f".layers.{i}." in name and p.requires_grad:
+                layer_trainable.append(name.split(".")[-2])
+        if layer_trainable:
+            print(f"    Layer {i:2d}: {', '.join(sorted(set(layer_trainable)))}", flush=True)
+
+    return unfrozen_params, total_params
+
+
+def apply_selective_vo_freezing(model, v_frozen_layers, o_frozen_layers):
+    """Selective V/O freezing: K+Q+MLP frozen everywhere; V and O frozen only in specified layers.
+
+    v_frozen_layers: set of layer indices where v_proj is frozen (rest trainable)
+    o_frozen_layers: set of layer indices where o_proj is frozen (rest trainable)
+    """
+    v_frozen = set(v_frozen_layers)
+    o_frozen = set(o_frozen_layers)
+
+    print(f"\n  Selective V/O freezing:", flush=True)
+    print(f"  K + Q + MLP: frozen in all 32 layers", flush=True)
+    print(f"  V frozen layers: {sorted(v_frozen)}  ({len(v_frozen)} frozen, {32 - len(v_frozen)} trainable)", flush=True)
+    print(f"  O frozen layers: {sorted(o_frozen)}  ({len(o_frozen)} frozen, {32 - len(o_frozen)} trainable)", flush=True)
+
+    for p in model.parameters():
+        p.requires_grad = False
+
+    unfrozen_count = 0
+    unfrozen_params = 0
+    for name, p in model.named_parameters():
+        if "layers." not in name:
+            continue
+        # Extract layer index
+        try:
+            idx = int(name.split(".layers.")[1].split(".")[0])
+        except (IndexError, ValueError):
+            continue
+
+        if ".v_proj." in name:
+            if idx not in v_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        elif ".o_proj." in name:
+            if idx not in o_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        # K, Q, MLP stay frozen
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"  Unfroze {unfrozen_count} tensors ({unfrozen_params:,} params, "
+          f"{unfrozen_params/total_params*100:.2f}%)", flush=True)
+
+    for i in range(32):
+        layer_trainable = []
+        for name, p in model.named_parameters():
+            if f".layers.{i}." in name and p.requires_grad:
+                layer_trainable.append(name.split(".")[-2])
+        if layer_trainable:
+            print(f"    Layer {i:2d}: {', '.join(sorted(set(layer_trainable)))}", flush=True)
+
+    return unfrozen_params, total_params
+
+
+def apply_selective_vo_freezing(model, v_frozen_layers, o_frozen_layers):
+    """Selective V/O freezing: K+Q+MLP frozen everywhere; V and O trainable except in specified layers.
+
+    v_frozen_layers: list of layer indices where v_proj stays frozen
+    o_frozen_layers: list of layer indices where o_proj stays frozen
+    """
+    v_frozen = set(v_frozen_layers)
+    o_frozen = set(o_frozen_layers)
+
+    for p in model.parameters():
+        p.requires_grad = False
+
+    unfrozen_count = 0
+    unfrozen_params = 0
+    for name, p in model.named_parameters():
+        if "layers." not in name:
+            continue
+        # Extract layer index
+        try:
+            layer_idx = int(name.split(".layers.")[1].split(".")[0])
+        except (IndexError, ValueError):
+            continue
+        if ".v_proj." in name:
+            if layer_idx not in v_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        elif ".o_proj." in name:
+            if layer_idx not in o_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        # K, Q, MLP stay frozen
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\n  Selective V/O freezing:", flush=True)
+    print(f"  K + Q + MLP: frozen in all 32 layers", flush=True)
+    print(f"  V frozen layers: {sorted(v_frozen)}  ({len(v_frozen)} frozen, {32 - len(v_frozen)} trainable)", flush=True)
+    print(f"  O frozen layers: {sorted(o_frozen)}  ({len(o_frozen)} frozen, {32 - len(o_frozen)} trainable)", flush=True)
+    print(f"  Unfroze {unfrozen_count} tensors ({unfrozen_params:,} params, "
+          f"{unfrozen_params/total_params*100:.2f}%)", flush=True)
+
+    for i in range(32):
+        layer_trainable = []
+        for name, p in model.named_parameters():
+            if f".layers.{i}." in name and p.requires_grad:
+                layer_trainable.append(name.split(".")[-2])
+        if layer_trainable:
+            print(f"    Layer {i:2d}: {', '.join(sorted(set(layer_trainable)))}", flush=True)
+
+    return unfrozen_params, total_params
+
+
+def apply_selective_vo_freezing(model, v_frozen_layers, o_frozen_layers):
+    """Selective V/O freezing: K+Q+MLP frozen everywhere; V and O frozen only in specified layers.
+
+    v_frozen_layers: list of layer indices where v_proj is frozen
+    o_frozen_layers: list of layer indices where o_proj is frozen
+    """
+    v_frozen = set(v_frozen_layers)
+    o_frozen = set(o_frozen_layers)
+
+    for p in model.parameters():
+        p.requires_grad = False
+
+    unfrozen_count = 0
+    unfrozen_params = 0
+    for name, p in model.named_parameters():
+        if "layers." not in name:
+            continue
+        layer_idx = None
+        for i in range(32):
+            if f".layers.{i}." in name:
+                layer_idx = i
+                break
+        if layer_idx is None:
+            continue
+
+        if ".v_proj." in name:
+            if layer_idx not in v_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        elif ".o_proj." in name:
+            if layer_idx not in o_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        # K, Q, MLP remain frozen
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\n  Selective V/O freezing:", flush=True)
+    print(f"  K + Q + MLP: frozen in all 32 layers", flush=True)
+    print(f"  V frozen layers: {sorted(v_frozen)}  ({len(v_frozen)} frozen, {32 - len(v_frozen)} trainable)", flush=True)
+    print(f"  O frozen layers: {sorted(o_frozen)}  ({len(o_frozen)} frozen, {32 - len(o_frozen)} trainable)", flush=True)
+    print(f"  Unfroze {unfrozen_count} tensors ({unfrozen_params:,} params, "
+          f"{unfrozen_params/total_params*100:.2f}%)", flush=True)
+
+    for i in range(32):
+        layer_trainable = []
+        for name, p in model.named_parameters():
+            if f".layers.{i}." in name and p.requires_grad:
+                layer_trainable.append(name.split(".")[-2])
+        if layer_trainable:
+            print(f"    Layer {i:2d}: {', '.join(sorted(set(layer_trainable)))}", flush=True)
+
+    return unfrozen_params, total_params
+
+
+def apply_selective_vo_freezing(model, v_frozen_layers, o_frozen_layers):
+    """Selective V/O freezing: K+Q+MLP frozen everywhere; V and O frozen only in specified layers.
+
+    v_frozen_layers: list of layer indices where v_proj is frozen
+    o_frozen_layers: list of layer indices where o_proj is frozen
+    """
+    v_frozen = set(v_frozen_layers)
+    o_frozen = set(o_frozen_layers)
+
+    for p in model.parameters():
+        p.requires_grad = False
+
+    unfrozen_count = 0
+    unfrozen_params = 0
+    for name, p in model.named_parameters():
+        if "layers." not in name:
+            continue
+        layer_idx = None
+        for i in range(32):
+            if f".layers.{i}." in name:
+                layer_idx = i
+                break
+        if layer_idx is None:
+            continue
+        if ".v_proj." in name:
+            if layer_idx not in v_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        elif ".o_proj." in name:
+            if layer_idx not in o_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        # K, Q, MLP remain frozen
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\n  Selective V/O freezing:", flush=True)
+    print(f"  K + Q + MLP: frozen in all 32 layers", flush=True)
+    print(f"  V frozen layers: {sorted(v_frozen)}  ({len(v_frozen)} frozen, {32 - len(v_frozen)} trainable)", flush=True)
+    print(f"  O frozen layers: {sorted(o_frozen)}  ({len(o_frozen)} frozen, {32 - len(o_frozen)} trainable)", flush=True)
+    print(f"  Unfroze {unfrozen_count} tensors ({unfrozen_params:,} params, "
+          f"{unfrozen_params/total_params*100:.2f}%)", flush=True)
+
+    for i in range(32):
+        layer_trainable = []
+        for name, p in model.named_parameters():
+            if f".layers.{i}." in name and p.requires_grad:
+                layer_trainable.append(name.split(".")[-2])
+        if layer_trainable:
+            print(f"    Layer {i:2d}: {', '.join(sorted(set(layer_trainable)))}", flush=True)
+
+    return unfrozen_params, total_params
+
+
+def apply_selective_vo_freezing(model, v_frozen_layers, o_frozen_layers):
+    """Selective V/O freezing: K+Q+MLP frozen everywhere; V and O frozen only in specified layers.
+
+    v_frozen_layers: list of layer indices where v_proj is frozen
+    o_frozen_layers: list of layer indices where o_proj is frozen
+    """
+    v_frozen = set(v_frozen_layers)
+    o_frozen = set(o_frozen_layers)
+
+    for p in model.parameters():
+        p.requires_grad = False
+
+    unfrozen_count = 0
+    unfrozen_params = 0
+    for name, p in model.named_parameters():
+        if "layers." not in name:
+            continue
+        # Extract layer index
+        try:
+            layer_idx = int(name.split(".layers.")[1].split(".")[0])
+        except (IndexError, ValueError):
+            continue
+        if ".v_proj." in name:
+            if layer_idx not in v_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        elif ".o_proj." in name:
+            if layer_idx not in o_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        # K, Q, MLP stay frozen
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\n  Selective V/O freezing:", flush=True)
+    print(f"  K + Q + MLP: frozen in all 32 layers", flush=True)
+    print(f"  V frozen layers: {sorted(v_frozen)}  ({len(v_frozen)} frozen, {32 - len(v_frozen)} trainable)", flush=True)
+    print(f"  O frozen layers: {sorted(o_frozen)}  ({len(o_frozen)} frozen, {32 - len(o_frozen)} trainable)", flush=True)
+    print(f"  Unfroze {unfrozen_count} tensors ({unfrozen_params:,} params, "
+          f"{unfrozen_params/total_params*100:.2f}%)", flush=True)
+
+    for i in range(32):
+        layer_trainable = []
+        for name, p in model.named_parameters():
+            if f".layers.{i}." in name and p.requires_grad:
+                layer_trainable.append(name.split(".")[-2])
+        if layer_trainable:
+            print(f"    Layer {i:2d}: {', '.join(sorted(set(layer_trainable)))}", flush=True)
+
+    return unfrozen_params, total_params
+
+
+def apply_selective_vo_freezing(model, v_frozen_layers, o_frozen_layers):
+    """Selective V/O freezing: K+Q+MLP frozen everywhere; V and O frozen only in specified layers.
+
+    v_frozen_layers: list of layer indices where v_proj is frozen
+    o_frozen_layers: list of layer indices where o_proj is frozen
+    """
+    v_frozen = set(v_frozen_layers)
+    o_frozen = set(o_frozen_layers)
+
+    for p in model.parameters():
+        p.requires_grad = False
+
+    unfrozen_count = 0
+    unfrozen_params = 0
+    for name, p in model.named_parameters():
+        if "layers." not in name:
+            continue
+        # Extract layer index
+        try:
+            layer_idx = int(name.split(".layers.")[1].split(".")[0])
+        except (IndexError, ValueError):
+            continue
+        # v_proj: trainable if layer NOT in v_frozen
+        if ".v_proj." in name:
+            if layer_idx not in v_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+            continue
+        # o_proj: trainable if layer NOT in o_frozen
+        if ".o_proj." in name:
+            if layer_idx not in o_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+            continue
+        # K, Q, MLP: always frozen (no action)
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\n  Selective V/O freezing:", flush=True)
+    print(f"  K + Q + MLP: frozen in all 32 layers", flush=True)
+    print(f"  V frozen layers: {sorted(v_frozen)}  ({len(v_frozen)} frozen, {32 - len(v_frozen)} trainable)", flush=True)
+    print(f"  O frozen layers: {sorted(o_frozen)}  ({len(o_frozen)} frozen, {32 - len(o_frozen)} trainable)", flush=True)
+    print(f"  Unfroze {unfrozen_count} tensors ({unfrozen_params:,} params, "
+          f"{unfrozen_params/total_params*100:.2f}%)", flush=True)
+
+    for i in range(32):
+        layer_trainable = []
+        for name, p in model.named_parameters():
+            if f".layers.{i}." in name and p.requires_grad:
+                short = name.split(".")[-2]
+                layer_trainable.append(short)
+        if layer_trainable:
+            print(f"    Layer {i:2d}: {', '.join(sorted(set(layer_trainable)))}", flush=True)
+
+    return unfrozen_params, total_params
+
+
+def apply_selective_vo_freezing(model, v_frozen_layers, o_frozen_layers):
+    """Selective V/O freezing: K+Q+MLP frozen everywhere; V and O frozen only in specified layers.
+
+    v_frozen_layers: list of layer indices where v_proj is frozen
+    o_frozen_layers: list of layer indices where o_proj is frozen
+    """
+    v_frozen = set(v_frozen_layers)
+    o_frozen = set(o_frozen_layers)
+
+    for p in model.parameters():
+        p.requires_grad = False
+
+    unfrozen_count = 0
+    unfrozen_params = 0
+    for name, p in model.named_parameters():
+        if "layers." not in name:
+            continue
+        layer_idx = None
+        for i in range(32):
+            if f".layers.{i}." in name:
+                layer_idx = i
+                break
+        if layer_idx is None:
+            continue
+        if ".v_proj." in name:
+            if layer_idx not in v_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        elif ".o_proj." in name:
+            if layer_idx not in o_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        # K, Q, MLP stay frozen
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\n  Selective V/O freezing:", flush=True)
+    print(f"  K + Q + MLP: frozen in all 32 layers", flush=True)
+    print(f"  V frozen layers: {sorted(v_frozen)}  ({len(v_frozen)} frozen, {32 - len(v_frozen)} trainable)", flush=True)
+    print(f"  O frozen layers: {sorted(o_frozen)}  ({len(o_frozen)} frozen, {32 - len(o_frozen)} trainable)", flush=True)
+    print(f"  Unfroze {unfrozen_count} tensors ({unfrozen_params:,} params, "
+          f"{unfrozen_params/total_params*100:.2f}%)", flush=True)
+
+    for i in range(32):
+        layer_trainable = []
+        for name, p in model.named_parameters():
+            if f".layers.{i}." in name and p.requires_grad:
+                short = name.split(".")[-2]
+                layer_trainable.append(short)
+        if layer_trainable:
+            print(f"    Layer {i:2d}: {', '.join(sorted(set(layer_trainable)))}", flush=True)
+
+    return unfrozen_params, total_params
+
+
+def apply_selective_vo_freezing(model, v_frozen_layers, o_frozen_layers):
+    """Selective V/O freezing: K+Q+MLP frozen everywhere; V and O frozen only in specified layers.
+
+    v_frozen_layers: list of layer indices where v_proj is frozen
+    o_frozen_layers: list of layer indices where o_proj is frozen
+    """
+    v_frozen = set(v_frozen_layers)
+    o_frozen = set(o_frozen_layers)
+
+    for p in model.parameters():
+        p.requires_grad = False
+
+    unfrozen_count = 0
+    unfrozen_params = 0
+    for name, p in model.named_parameters():
+        if "layers." not in name:
+            continue
+        layer_idx = None
+        for i in range(32):
+            if f".layers.{i}." in name:
+                layer_idx = i
+                break
+        if layer_idx is None:
+            continue
+        if ".v_proj." in name:
+            if layer_idx not in v_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        elif ".o_proj." in name:
+            if layer_idx not in o_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        # K, Q, MLP stay frozen
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\n  Selective V/O freezing:", flush=True)
+    print(f"  K + Q + MLP: frozen in all 32 layers", flush=True)
+    print(f"  V frozen layers: {sorted(v_frozen)}  ({len(v_frozen)} frozen, {32 - len(v_frozen)} trainable)", flush=True)
+    print(f"  O frozen layers: {sorted(o_frozen)}  ({len(o_frozen)} frozen, {32 - len(o_frozen)} trainable)", flush=True)
+    print(f"  Unfroze {unfrozen_count} tensors ({unfrozen_params:,} params, "
+          f"{unfrozen_params/total_params*100:.2f}%)", flush=True)
+
+    for i in range(32):
+        layer_trainable = []
+        for name, p in model.named_parameters():
+            if f".layers.{i}." in name and p.requires_grad:
+                layer_trainable.append(name.split(".")[-2])
+        if layer_trainable:
+            print(f"    Layer {i:2d}: {', '.join(sorted(set(layer_trainable)))}", flush=True)
+
+    return unfrozen_params, total_params
+
+
+def apply_selective_vo_freezing(model, v_frozen_layers, o_frozen_layers):
+    """Selective V/O freezing: K+Q+MLP frozen everywhere; V and O frozen only in specified layers.
+
+    v_frozen_layers: list of layer indices where v_proj is frozen
+    o_frozen_layers: list of layer indices where o_proj is frozen
+    """
+    v_frozen = set(v_frozen_layers)
+    o_frozen = set(o_frozen_layers)
+
+    for p in model.parameters():
+        p.requires_grad = False
+
+    unfrozen_count = 0
+    unfrozen_params = 0
+    for name, p in model.named_parameters():
+        if "layers." not in name:
+            continue
+        layer_idx = None
+        for i in range(32):
+            if f".layers.{i}." in name:
+                layer_idx = i
+                break
+        if layer_idx is None:
+            continue
+        if ".v_proj." in name:
+            if layer_idx not in v_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        elif ".o_proj." in name:
+            if layer_idx not in o_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        # K, Q, MLP stay frozen
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\n  Selective V/O freezing:", flush=True)
+    print(f"  K + Q + MLP: frozen in all 32 layers", flush=True)
+    print(f"  V frozen layers: {sorted(v_frozen)}  ({len(v_frozen)} frozen, {32-len(v_frozen)} trainable)", flush=True)
+    print(f"  O frozen layers: {sorted(o_frozen)}  ({len(o_frozen)} frozen, {32-len(o_frozen)} trainable)", flush=True)
+    print(f"  Unfroze {unfrozen_count} tensors ({unfrozen_params:,} params, "
+          f"{unfrozen_params/total_params*100:.2f}%)", flush=True)
+
+    for i in range(32):
+        layer_trainable = []
+        for name, p in model.named_parameters():
+            if f".layers.{i}." in name and p.requires_grad:
+                layer_trainable.append(name.split(".")[-2])
+        if layer_trainable:
+            print(f"    Layer {i:2d}: {', '.join(sorted(set(layer_trainable)))}", flush=True)
+
+    return unfrozen_params, total_params
+
+
+def apply_selective_vo_freezing(model, v_frozen_layers, o_frozen_layers):
+    """Selective V/O freezing: K+Q+MLP frozen everywhere; V and O frozen only in specified layers.
+
+    v_frozen_layers: list of layer indices where v_proj is frozen
+    o_frozen_layers: list of layer indices where o_proj is frozen
+    """
+    v_frozen = set(v_frozen_layers)
+    o_frozen = set(o_frozen_layers)
+
+    for p in model.parameters():
+        p.requires_grad = False
+
+    unfrozen_count = 0
+    unfrozen_params = 0
+    for name, p in model.named_parameters():
+        if "layers." not in name:
+            continue
+        layer_idx = None
+        for i in range(32):
+            if f".layers.{i}." in name:
+                layer_idx = i
+                break
+        if layer_idx is None:
+            continue
+        if ".v_proj." in name:
+            if layer_idx not in v_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        elif ".o_proj." in name:
+            if layer_idx not in o_frozen:
+                p.requires_grad = True
+                unfrozen_count += 1
+                unfrozen_params += p.numel()
+        # K, Q, MLP stay frozen
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\n  Selective V/O freezing:", flush=True)
+    print(f"  K + Q + MLP: frozen in all 32 layers", flush=True)
+    print(f"  V frozen layers: {sorted(v_frozen)}  ({len(v_frozen)} frozen, {32-len(v_frozen)} trainable)", flush=True)
+    print(f"  O frozen layers: {sorted(o_frozen)}  ({len(o_frozen)} frozen, {32-len(o_frozen)} trainable)", flush=True)
+    print(f"  Unfroze {unfrozen_count} tensors ({unfrozen_params:,} params, "
+          f"{unfrozen_params/total_params*100:.2f}%)", flush=True)
+
+    for i in range(32):
+        layer_trainable = []
+        for name, p in model.named_parameters():
+            if f".layers.{i}." in name and p.requires_grad:
+                layer_trainable.append(name.split(".")[-2])
+        if layer_trainable:
+            print(f"    Layer {i:2d}: {', '.join(sorted(set(layer_trainable)))}", flush=True)
+
+    return unfrozen_params, total_params
+
+
 # ──────────────────────────────────────────────────────────────────────
 #  Dataset
 # ──────────────────────────────────────────────────────────────────────
@@ -305,8 +1009,12 @@ def generate_epoch_loss_plot(mcb, output_dir, label):
 def main():
     parser = argparse.ArgumentParser(description="GSM8K Frozen Finetuning")
     parser.add_argument("--model", type=str, default="meta-llama/Llama-3.1-8B")
-    parser.add_argument("--plan", type=str, choices=["A", "B", "C", "D"], required=True,
+    parser.add_argument("--plan", type=str, choices=["A", "B", "C", "D"], default=None,
                         help="A: V+O+MLP layers 0-9 | B: V+O layers 0-9 | C: V+O+MLP layers 22-31+head | D: V+O layers 22-31+head")
+    parser.add_argument("--v-frozen-layers", type=str, default=None,
+                        help="Comma-separated layer indices to freeze V (e.g. 26,27,28,29,30,31). Use with --o-frozen-layers for selective V/O mode.")
+    parser.add_argument("--o-frozen-layers", type=str, default=None,
+                        help="Comma-separated layer indices to freeze O. Use with --v-frozen-layers for selective V/O mode.")
     parser.add_argument("--trainable-layers", type=int, nargs="+", default=None,
                         help="Which layers to unfreeze (default: 0-9)")
     parser.add_argument("--output-dir", type=str, default=None)
@@ -320,24 +1028,39 @@ def main():
                         help="Path to custom JSON dataset (e.g. perturbed). Uses HF gsm8k if not set.")
     args = parser.parse_args()
 
-    if args.trainable_layers is None:
-        if args.plan in ("C", "D"):
-            args.trainable_layers = list(range(22, 32))
-        else:
-            args.trainable_layers = list(range(10))
-    if args.output_dir is None:
-        args.output_dir = f"gsm8k-frozen-plan{args.plan}"
+    selective_mode = args.v_frozen_layers is not None and args.o_frozen_layers is not None
+    if selective_mode:
+        if args.output_dir is None:
+            parser.error("--output-dir is required for selective V/O mode (--v-frozen-layers and --o-frozen-layers)")
+        v_frozen = [int(x.strip()) for x in args.v_frozen_layers.split(",") if x.strip()]
+        o_frozen = [int(x.strip()) for x in args.o_frozen_layers.split(",") if x.strip()]
+        label = f"Selective V/O ({args.output_dir})"
+    else:
+        if args.plan is None:
+            parser.error("Either --plan or both --v-frozen-layers and --o-frozen-layers are required")
+        if args.trainable_layers is None:
+            if args.plan in ("C", "D"):
+                args.trainable_layers = list(range(22, 32))
+            else:
+                args.trainable_layers = list(range(10))
+        if args.output_dir is None:
+            args.output_dir = f"gsm8k-frozen-plan{args.plan}"
+        label = f"Plan {args.plan} (layers {min(args.trainable_layers)}-{max(args.trainable_layers)})"
 
     timing = {}
-    label = f"Plan {args.plan} (layers {min(args.trainable_layers)}-{max(args.trainable_layers)})"
 
     # Banner
     print(f"\n{'='*60}", flush=True)
-    print(f"  GSM8K FROZEN FINETUNING — PLAN {args.plan}", flush=True)
+    print(f"  GSM8K FROZEN FINETUNING" + (" — SELECTIVE V/O" if selective_mode else f" — PLAN {args.plan}"), flush=True)
     print(f"{'='*60}", flush=True)
     print(f"  Model:           {args.model}", flush=True)
-    print(f"  Plan:            {args.plan}", flush=True)
-    print(f"  Trainable layers:{args.trainable_layers}", flush=True)
+    if selective_mode:
+        print(f"  Mode:            Selective V/O freezing", flush=True)
+        print(f"  V frozen layers: {v_frozen}", flush=True)
+        print(f"  O frozen layers: {o_frozen}", flush=True)
+    else:
+        print(f"  Plan:            {args.plan}", flush=True)
+        print(f"  Trainable layers:{args.trainable_layers}", flush=True)
     print(f"  LR:              {args.lr} (cosine)", flush=True)
     print(f"  Epochs:          {args.epochs}", flush=True)
     print(f"  Batch size:      {args.batch_size} x {args.grad_accum} "
@@ -368,7 +1091,10 @@ def main():
     print("\n[2/5] Applying freezing...", flush=True)
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
-    trainable_params, total_params = apply_freezing(model, args.plan, args.trainable_layers)
+    if selective_mode:
+        trainable_params, total_params = apply_selective_vo_freezing(model, v_frozen, o_frozen)
+    else:
+        trainable_params, total_params = apply_freezing(model, args.plan, args.trainable_layers)
 
     # [3] Dataset
     print("\n[3/5] Preparing dataset...", flush=True)

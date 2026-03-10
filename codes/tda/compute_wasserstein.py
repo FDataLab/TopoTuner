@@ -18,22 +18,86 @@ def compute_direct_comparisons(pairs, label):
             dgm2 = load_pkl(file2)
 
             h0 = wasserstein_distance(dgm1[0], dgm2[0])
-            h1 = wasserstein_distance(dgm1[1], dgm2[1])
-            results.append({
+            h1 = wasserstein_distance(dgm1[1], dgm2[1]) if len(dgm1) > 1 and len(dgm2) > 1 else None
+            row = {
                 "Type": label,
                 "File": os.path.basename(file1),
                 "Wasserstein H0": h0,
-                "Wasserstein H1": h1
-            })
+            }
+            if h1 is not None:
+                row["Wasserstein H1"] = h1
+            results.append(row)
         except Exception as e:
             print(f"❌ Skipping {file1} vs {file2}: {e}")
     return results
 
+def compute_baseline_vs_epochs(baseline_dir, epoch_dirs, output_csv, projections=None):
+    """Compare baseline persistence diagrams against each epoch's diagrams.
+
+    Args:
+        baseline_dir: path to SavedDiagrams/ for baseline (epoch 0 / pretrained)
+        epoch_dirs: list of (epoch_label, path_to_SavedDiagrams)
+        output_csv: where to write results
+        projections: list of projection suffixes to compare, e.g. ["q", "k", "v", "o"]
+    """
+    if projections is None:
+        projections = ["q", "k", "v", "o"]
+
+    all_results = []
+    for epoch_label, epoch_dir in epoch_dirs:
+        for proj in projections:
+            suffix = f"_{proj}.pkl"
+            pairs = []
+            for fname in sorted(os.listdir(baseline_dir)):
+                if fname.endswith(suffix):
+                    f1 = os.path.join(baseline_dir, fname)
+                    f2 = os.path.join(epoch_dir, fname)
+                    if os.path.exists(f2):
+                        pairs.append((f1, f2))
+            if not pairs:
+                print(f"  ⚠️ No matching {proj} files for {epoch_label}")
+                continue
+            results = compute_direct_comparisons(pairs, f"Baseline vs {epoch_label} ({proj})")
+            for r in results:
+                r["Epoch"] = epoch_label
+                r["Projection"] = proj
+            all_results += results
+
+    df = pd.DataFrame(all_results)
+    os.makedirs(os.path.dirname(output_csv) or ".", exist_ok=True)
+    df.to_csv(output_csv, index=False)
+    print(f"\n✅ Saved Wasserstein results to: {output_csv}")
+    return df
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", required=True)
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--dataset", default=None)
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--baseline-dir", default=None,
+                        help="Direct path to baseline SavedDiagrams/ (bypasses dataset/model path construction)")
+    parser.add_argument("--epoch-dirs", default=None,
+                        help="Comma-separated epoch_label:path pairs, e.g. 'epoch_1:/path/to/e1/SavedDiagrams,epoch_2:/path/to/e2/SavedDiagrams'")
+    parser.add_argument("--output", default=None, help="Output CSV path")
+    parser.add_argument("--projections", default="q,k,v,o",
+                        help="Comma-separated projection types (default: q,k,v,o)")
     args = parser.parse_args()
+
+    # Direct path mode
+    if args.baseline_dir:
+        if not args.epoch_dirs or not args.output:
+            parser.error("--epoch-dirs and --output are required with --baseline-dir")
+        epoch_dirs = []
+        for entry in args.epoch_dirs.split(","):
+            label, path = entry.split(":", 1)
+            epoch_dirs.append((label, path))
+        projections = [p.strip() for p in args.projections.split(",")]
+        compute_baseline_vs_epochs(args.baseline_dir, epoch_dirs, args.output, projections)
+        exit(0)
+
+    # Legacy mode (original hardcoded paths)
+    if not args.dataset or not args.model:
+        parser.error("--dataset and --model are required in legacy mode")
 
     base = "/staging/users/aerol1/tda/Topo-Tuner"
     dset, model = args.dataset, args.model
@@ -51,7 +115,6 @@ if __name__ == "__main__":
     all_results = []
 
     for suffix in ["_q.pkl", "_k.pkl", "_v.pkl"]:
-        # Baseline vs LoRA BA
         pairs = []
         for fname in os.listdir(paths["baseline"]):
             if fname.endswith(suffix):
@@ -61,7 +124,6 @@ if __name__ == "__main__":
                     pairs.append((f1, f2))
         all_results += compute_direct_comparisons(pairs, f"Baseline vs LoRA BA ({suffix[1]})")
 
-        # Baseline vs Full Finetune
         pairs = []
         for fname in os.listdir(paths["baseline"]):
             if fname.endswith(suffix):
@@ -71,7 +133,6 @@ if __name__ == "__main__":
                     pairs.append((f1, f2))
         all_results += compute_direct_comparisons(pairs, f"Baseline vs Full Finetune ({suffix[1]})")
 
-        # LoRA BA vs Full Finetune
         pairs = []
         for fname in os.listdir(paths["lora_BA"]):
             if fname.endswith(suffix):
@@ -81,7 +142,6 @@ if __name__ == "__main__":
                     pairs.append((f1, f2))
         all_results += compute_direct_comparisons(pairs, f"LoRA BA vs Full Finetune ({suffix[1]})")
 
-        # LoRA A: epoch 1 vs epoch 6
         pairs = []
         for fname in os.listdir(paths["lora_A_1"]):
             if fname.endswith(suffix):
@@ -91,7 +151,6 @@ if __name__ == "__main__":
                     pairs.append((f1, f2))
         all_results += compute_direct_comparisons(pairs, f"LoRA A: Epoch 1 vs 6 ({suffix[1]})")
 
-        # LoRA B: epoch 1 vs epoch 6
         pairs = []
         for fname in os.listdir(paths["lora_B_1"]):
             if fname.endswith(suffix):
@@ -101,7 +160,6 @@ if __name__ == "__main__":
                     pairs.append((f1, f2))
         all_results += compute_direct_comparisons(pairs, f"LoRA B: Epoch 1 vs 6 ({suffix[1]})")
 
-    # Save results
     df = pd.DataFrame(all_results)
     os.makedirs(f"{base}/wasserstein_results", exist_ok=True)
     save_path = f"{base}/wasserstein_results/wasserstein_{dset}_{model}.csv"

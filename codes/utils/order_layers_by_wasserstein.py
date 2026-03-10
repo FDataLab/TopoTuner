@@ -1,168 +1,81 @@
 #!/usr/bin/env python3
 """
-Order layers by Wasserstein distance for Q, K, V projections.
+Order layers by Wasserstein distance for Q, K, V, O projections.
 
-This script loads Wasserstein distance data and orders all layers
-from lowest to highest average distance for each projection type (Q, K, V).
+Two modes:
+  1. --csv <wasserstein_results.csv>  (reads CSV from compute_wasserstein.py direct mode)
+  2. Legacy mode using generate_wasserstein_boxplots_plotly_prior (old pipeline)
 
 The "lowest" layers have the smallest Wasserstein distance (least change),
 and "highest" layers have the largest Wasserstein distance (most change).
 """
 
 import os
-import sys
+import re
+import argparse
 import pandas as pd
 
-# Add parent directory to path to import from codes.tda
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-from codes.tda.generate_wasserstein_boxplots_plotly_prior import (
-    process_all_data,
-    calculate_combined_averages,
-    MODELS,
-    DATASETS,
-    MATRIX_TYPES,
-    WASSERSTEIN_TYPES,
-    COMBINED_TYPES,
-    EPOCHS,
-)
+def order_from_csv(csv_path, projections=None, wasserstein_type="H0", output_file=None):
+    """Order layers from a Wasserstein CSV produced by compute_wasserstein.py --baseline-dir mode.
 
-
-def order_layers_by_distance(combo_data: pd.DataFrame, matrix_type: str, wasserstein_type: str):
+    Expected CSV columns: Type, File, Wasserstein H0, Wasserstein H1, Epoch, Projection
+    The 'File' column has names like 'layer5_o.pkl' from which we extract the layer index.
     """
-    Order all layers by average Wasserstein distance (lowest to highest).
-    
-    Args:
-        combo_data: DataFrame with Wasserstein distance data
-        matrix_type: 'q', 'k', or 'v' (lowercase)
-        wasserstein_type: 'H0' or 'H1'
-    
-    Returns:
-        List of layer indices ordered from lowest to highest average distance
-    """
-    # Filter to specific matrix type and Wasserstein type
-    filtered = combo_data[
-        (combo_data["MatrixType"] == matrix_type.lower()) &
-        (combo_data["WassersteinType"] == wasserstein_type)
-    ].copy()
-    
-    if filtered.empty:
-        print(f"  Warning: No data for {matrix_type.upper()}-{wasserstein_type}")
-        return []
-    
-    # Group by layer and compute mean distance across all datasets
-    layer_mean = filtered.groupby("Layer")["AvgDistance"].mean().sort_values()
-    
-    # Return all layers ordered from lowest to highest distance
-    return layer_mean.index.astype(int).tolist()
+    df = pd.read_csv(csv_path)
+    if projections is None:
+        projections = sorted(df["Projection"].unique()) if "Projection" in df.columns else ["q", "k", "v", "o"]
 
+    wass_col = f"Wasserstein {wasserstein_type}"
+    if wass_col not in df.columns:
+        print(f"⚠️ Column '{wass_col}' not found. Available: {list(df.columns)}")
+        return {}
 
-def main():
-    """Generate layer orderings for Q, K, V based on Wasserstein distance for all models."""
-    
-    print("Loading Wasserstein distance data...")
-    df = process_all_data()
-    
-    print(f"Loaded {len(df)} rows")
-    print(f"Models found: {sorted(df['Model'].unique())}")
-    
-    # Process all models
-    wasserstein_type = "H0"  # Using H0 as in layer_analysis.txt
-    
-    # Store results for all models
-    all_results = {}
-    
-    print("\n" + "="*70)
-    print("Layer Ordering by Wasserstein Distance (Lowest to Highest)")
-    print("="*70)
-    print(f"\nUsing WassersteinType: {wasserstein_type}")
-    print("MatrixType: Q, K, V\n")
-    
-    # Process each model
-    for model_key in sorted(MODELS.keys()):
-        if model_key not in df['Model'].unique():
-            print(f"⚠️  Warning: Model {model_key} not found in data, skipping...")
+    results = {}
+    for proj in projections:
+        sub = df[df["Projection"] == proj].copy() if "Projection" in df.columns else df
+        if sub.empty:
+            print(f"  ⚠️ No data for projection {proj}")
             continue
-        
-        print(f"\n{'='*70}")
-        print(f"Processing: {model_key}")
-        print(f"{'='*70}")
-        
-        model_df = df[df["Model"] == model_key]
-        if model_df.empty:
-            print(f"  ⚠️  No data found for model {model_key}, skipping...")
-            continue
-        
-        avg_data = calculate_combined_averages(model_df)
-        
-        if avg_data.empty:
-            print(f"  ⚠️  No combined data after filtering for {model_key}, skipping...")
-            continue
-        
-        # Order layers for Q, K, V
-    q_ordered = order_layers_by_distance(avg_data, "q", wasserstein_type)
-    k_ordered = order_layers_by_distance(avg_data, "k", wasserstein_type)
-    v_ordered = order_layers_by_distance(avg_data, "v", wasserstein_type)
-    
-        if not q_ordered or not k_ordered or not v_ordered:
-            print(f"  ⚠️  Incomplete data for {model_key}, skipping...")
-            continue
-        
-        # Store results
-        all_results[model_key] = {
-            'q': q_ordered,
-            'k': k_ordered,
-            'v': v_ordered
-        }
-        
-        print(f"\nQ layers (ordered lowest to highest distance):")
-    print(f"  {q_ordered}")
-    print(f"\nK layers (ordered lowest to highest distance):")
-    print(f"  {k_ordered}")
-    print(f"\nV layers (ordered lowest to highest distance):")
-    print(f"  {v_ordered}")
-    
-        # Print shell script format
-        print(f"\n--- Shell Script Format for {model_key} ---")
-        print(f"Q_ORDERED_LAYERS=({' '.join(map(str, q_ordered))})")
-    print(f"K_ORDERED_LAYERS=({' '.join(map(str, k_ordered))})")
-    print(f"V_ORDERED_LAYERS=({' '.join(map(str, v_ordered))})")
-    
-    # Save all results to file
-    output_file = os.path.join(os.path.dirname(__file__), "../../layer_orderings.txt")
-    with open(output_file, "w") as f:
-        f.write("# Layer orderings by Wasserstein distance (lowest to highest)\n")
-        f.write("# Generated from Wasserstein distance analysis\n")
-        f.write(f"# WassersteinType: {wasserstein_type}\n")
-        f.write("# Format: Layers are ordered from lowest to highest Wasserstein distance\n")
-        f.write("# Usage: Copy the arrays for your model into your shell script\n\n")
-        
-        for model_key in sorted(all_results.keys()):
-            results = all_results[model_key]
-            f.write(f"# ============================================================\n")
-        f.write(f"# Model: {model_key}\n")
-            f.write(f"# ============================================================\n\n")
-            
-            f.write(f"# {model_key} - Q projection layers (ordered lowest to highest)\n")
-            f.write(f"Q_ORDERED_LAYERS_{model_key.upper().replace('-', '_')}=({' '.join(map(str, results['q']))})\n\n")
-            
-            f.write(f"# {model_key} - K projection layers (ordered lowest to highest)\n")
-            f.write(f"K_ORDERED_LAYERS_{model_key.upper().replace('-', '_')}=({' '.join(map(str, results['k']))})\n\n")
-            
-            f.write(f"# {model_key} - V projection layers (ordered lowest to highest)\n")
-            f.write(f"V_ORDERED_LAYERS_{model_key.upper().replace('-', '_')}=({' '.join(map(str, results['v']))})\n\n")
-            
-            # Also write in shell script format (without model suffix for easier copy-paste)
-            f.write(f"# Shell script format (for direct copy-paste):\n")
-            f.write(f"# Q_ORDERED_LAYERS=({' '.join(map(str, results['q']))})\n")
-            f.write(f"# K_ORDERED_LAYERS=({' '.join(map(str, results['k']))})\n")
-            f.write(f"# V_ORDERED_LAYERS=({' '.join(map(str, results['v']))})\n\n")
-    
-    print(f"\n{'='*70}")
-    print(f"✅ Saved all layer orderings to: {output_file}")
-    print(f"{'='*70}")
-    print(f"\nProcessed {len(all_results)} model(s): {', '.join(sorted(all_results.keys()))}")
+
+        # Extract layer index from File column (e.g. layer5_o.pkl -> 5)
+        sub = sub.copy()
+        sub["Layer"] = sub["File"].apply(lambda f: int(re.search(r"layer(\d+)", f).group(1)))
+
+        # Average Wasserstein distance per layer across all epochs
+        layer_avg = sub.groupby("Layer")[wass_col].mean().sort_values()
+        ordered = layer_avg.index.tolist()
+        results[proj] = ordered
+
+        print(f"\n{proj.upper()} layers (lowest → highest Wasserstein {wasserstein_type}):")
+        print(f"  {ordered}")
+        print(f"  Distances: {[round(layer_avg[l], 6) for l in ordered]}")
+
+    # Save to file
+    if output_file:
+        with open(output_file, "w") as f:
+            f.write(f"# Layer orderings by Wasserstein distance (lowest to highest)\n")
+            f.write(f"# Source: {csv_path}\n")
+            f.write(f"# WassersteinType: {wasserstein_type}\n\n")
+            for proj in sorted(results.keys()):
+                ordered = results[proj]
+                f.write(f"{proj.upper()}_ORDERED_LAYERS=({' '.join(map(str, ordered))})\n")
+        print(f"\n✅ Saved layer orderings to: {output_file}")
+
+    return results
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Order layers by Wasserstein distance")
+    parser.add_argument("--csv", required=True,
+                        help="Path to Wasserstein results CSV from compute_wasserstein.py")
+    parser.add_argument("--projections", default=None,
+                        help="Comma-separated projections to order (default: all found in CSV)")
+    parser.add_argument("--wasserstein-type", default="H0", choices=["H0", "H1"])
+    parser.add_argument("--output", default=None,
+                        help="Output file for layer orderings (default: print only)")
+    args = parser.parse_args()
+
+    projs = [p.strip() for p in args.projections.split(",")] if args.projections else None
+    order_from_csv(args.csv, projections=projs, wasserstein_type=args.wasserstein_type,
+                   output_file=args.output)
