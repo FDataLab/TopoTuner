@@ -7,13 +7,26 @@ are directly comparable to published paper scores.
 Key details:
   - 8 fixed few-shot examples (Chain-of-Thought reasoning demos)
   - Greedy decoding (do_sample=False)
-  - Exact match on extracted numerical answers
+  - Final-answer extraction: **last** strict phrase (``The answer is X`` / ``Final answer: X``),
+    else last-line ``= num``, else last bare number in full sanitized text; degenerate tails trimmed
+  - Numeric equivalence via ``Decimal`` (e.g. 16 vs 16.00); display strings canonicalized
   - Left-padded batched inference for GPU efficiency
+
+Main improvements without changing decoding/model settings: better final-answer extraction,
+stronger normalization, and filtering degenerate outputs before scoring.
 
 Usage:
   python eval_gsm8k.py --model meta-llama/Llama-3.1-8B
   python eval_gsm8k.py --model ./gsm8k-lora-finetuned --batch-size 128
   python eval_gsm8k.py --model ./gsm8k-full-finetuned --verbose
+
+Default ``--output-dir`` is ``<topo>/numpy_weights/exploration-finetuning/results`` (two levels
+up from this file to ``topo``, then that path). Override with ``--output-dir`` or env
+``GSM8K_EVAL_RESULTS_DIR``.
+
+**Canonical eval settings (Llama / Qwen-base pipelines use these defaults):**
+``--batch-size 64``, ``--max-new-tokens 512``, full GSM8K test (omit ``--max-samples``).
+Override only when you intend a smoke subset or different throughput.
 """
 
 import argparse
@@ -21,6 +34,8 @@ import json
 import os
 import re
 import time
+from collections import Counter
+from decimal import Decimal, InvalidOperation
 
 import torch
 from datasets import load_dataset
@@ -29,6 +44,18 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def log(msg=""):
     print(msg, flush=True)
+
+
+def default_results_dir() -> str:
+    """``<topo>/numpy_weights/exploration-finetuning/results`` unless GSM8K_EVAL_RESULTS_DIR is set."""
+    override = os.environ.get("GSM8K_EVAL_RESULTS_DIR")
+    if override:
+        return os.path.abspath(override)
+    gsm8k_dir = os.path.dirname(os.path.abspath(__file__))
+    topo_root = os.path.normpath(os.path.join(gsm8k_dir, "..", ".."))
+    return os.path.join(
+        topo_root, "numpy_weights", "exploration-finetuning", "results"
+    )
 
 
 # ──────────────────────────────────────────────
@@ -56,43 +83,241 @@ FEW_SHOT_EXAMPLES = [
 
 
 # ──────────────────────────────────────────────
-#  Answer extraction
+#  Answer extraction & generation cleanup
 # ──────────────────────────────────────────────
 
-def extract_answer(text: str):
-    """Extract the numerical answer from model-generated text.
+_STRICT_FINAL_PATTERNS = [
+    # "The answer is 6" / "the answer is $16.00"
+    re.compile(r"[Tt]he answer is\s*\$?\s*(-?[\d,]+\.?\d*)", re.I),
+    # "Final answer: 42" / "Final Answer: $3"
+    re.compile(r"[Ff]inal\s*answer\s*:\s*\$?\s*(-?[\d,]+\.?\d*)", re.I),
+]
 
-    Two strategies (in priority order):
-      1. Strict: Look for "The answer is X" — the pattern few-shot examples teach
-      2. Fallback: Take the last number in the text
 
-    The strict approach works when the model follows the CoT format properly.
-    The fallback catches cases where the model gives the right number but
-    doesn't follow the exact template.
-    """
-    # Strict
-    match = re.findall(r'[Tt]he answer is\s*\$?\s*(-?[\d,]+\.?\d*)', text)
-    if match:
-        return match[-1].replace(',', '').strip()
-    # Flexible: last number
-    numbers = re.findall(r'(-?\d[\d,]*\.?\d*)', text)
-    if numbers:
-        return numbers[-1].replace(',', '').strip()
-    return None
+def strip_repeated_trailing_lines(text: str) -> tuple[str, bool]:
+    """Drop a tail of 3+ identical non-trivial lines (common loop/degeneration)."""
+    lines = text.split("\n")
+    changed = False
+    while len(lines) >= 2:
+        t = lines[-1].strip()
+        if len(t) < 8:
+            break
+        run = 1
+        i = len(lines) - 2
+        while i >= 0 and lines[i].strip() == t:
+            run += 1
+            i -= 1
+        if run >= 3:
+            lines = lines[: i + 1]
+            changed = True
+        else:
+            break
+    return "\n".join(lines), changed
+
+
+def truncate_before_absurd_numeric_line(text: str) -> tuple[str, bool]:
+    """Truncate before a very long mostly-numeric line (repeating decimals, garbage tails)."""
+    lines = text.split("\n")
+    out: list[str] = []
+    trimmed = False
+    for line in lines:
+        core = line.strip()
+        if len(core) > 100:
+            frac = sum(c.isdigit() or c in ".,eE+-" for c in core) / len(core)
+            if frac > 0.45 and "answer" not in core.lower():
+                trimmed = True
+                break
+        out.append(line)
+    return "\n".join(out), trimmed
+
+
+def sanitize_generation(text: str) -> tuple[str, dict]:
+    """Trim degenerate suffixes before parsing a final answer."""
+    flags: dict[str, bool] = {}
+    t, a = truncate_before_absurd_numeric_line(text)
+    flags["absurd_numeric_line_trimmed"] = a
+    t, b = strip_repeated_trailing_lines(t)
+    flags["repeated_lines_trimmed"] = b
+    return t, flags
+
+
+def _clean_numeric_token(s: str) -> str:
+    """Strip wrappers; remove a stray trailing period after an integer (``10.`` → ``10``)."""
+    t = s.replace(",", "").strip().rstrip(".")
+    return t
+
+
+def extract_strict_final_number(text: str) -> str | None:
+    """Take the numeric capture from the **last** strict final-answer phrase in document order."""
+    best: str | None = None
+    best_end = -1
+    for rx in _STRICT_FINAL_PATTERNS:
+        for m in rx.finditer(text):
+            if m.end() > best_end:
+                best_end = m.end()
+                best = _clean_numeric_token(m.group(1))
+    return best
+
+
+def extract_last_equals_on_last_line(text: str) -> str | None:
+    """If the final non-empty line ends an arithmetic chain ``... = 12``, return that number."""
+    lines = [ln.strip() for ln in text.strip().split("\n") if ln.strip()]
+    if not lines:
+        return None
+    last = lines[-1]
+    if len(last) > 200:
+        return None
+    m = re.search(r"=\s*\$?\s*(-?[\d,]+\.?\d*)\s*\.?\s*$", last)
+    if not m:
+        return None
+    return _clean_numeric_token(m.group(1))
+
+
+def extract_last_equals_in_tail(text: str, tail_chars: int = 800) -> str | None:
+    """Last ``= <num>`` in the tail of the text (diagnostic / consistency check)."""
+    tail = text[-tail_chars:] if len(text) > tail_chars else text
+    matches = list(re.finditer(r"=\s*\$?\s*(-?[\d,]+\.?\d*)", tail))
+    if not matches:
+        return None
+    return _clean_numeric_token(matches[-1].group(1))
+
+
+def extract_loose_last_number(text: str) -> str | None:
+    """Last bare number in text (fallback after strict / last-line '='; may grab intermediates)."""
+    numbers = re.findall(r"(-?\d[\d,]*\.?\d*)", text)
+    if not numbers:
+        return None
+    return numbers[-1].replace(",", "").strip()
 
 
 def extract_gold(answer_text: str):
     """Extract gold answer from GSM8K '#### X' format."""
-    if '####' in answer_text:
-        return answer_text.split('####')[-1].strip().replace(',', '')
+    if "####" in answer_text:
+        return answer_text.split("####")[-1].strip().replace(",", "")
     return None
 
 
 def normalize(s):
-    """Normalize for comparison: strip whitespace, commas, $, trailing period."""
+    """Light string cleanup for display and fallback comparison."""
     if s is None:
         return None
-    return s.strip().replace(',', '').replace('$', '').rstrip('.')
+    return s.strip().replace(",", "").replace("$", "").rstrip(".")
+
+
+def answers_match(gold: str | None, pred: str | None) -> bool:
+    """True if extracted gold and predicted strings denote the same number.
+
+    GSM8K gold is usually an integer string; models often emit decimals ($16.00).
+    ``Decimal('16') == Decimal('16.00')`` so we avoid false negatives from formatting.
+    """
+    if gold is None or pred is None:
+        return False
+
+    def _prep(x: str) -> str:
+        t = x.strip().replace(",", "").replace("$", "").replace("%", "").replace(" ", "")
+        t = t.rstrip(".")
+        return t
+
+    g, p = _prep(gold), _prep(pred)
+    if not g or not p:
+        return False
+    try:
+        return Decimal(g) == Decimal(p)
+    except InvalidOperation:
+        return normalize(gold) == normalize(pred)
+
+
+def format_answer_for_report(s: str | None) -> str | None:
+    """Canonical display: strip clutter; drop trailing zeros (16.00 → 16)."""
+    if s is None:
+        return None
+    t = s.strip().replace(",", "").replace("$", "").replace("%", "").replace(" ", "")
+    t = t.rstrip(".")
+    if not t:
+        return None
+    try:
+        d = Decimal(t)
+        if d == d.to_integral_value():
+            return str(int(d))
+        s2 = format(d, "f").rstrip("0").rstrip(".")
+        return s2
+    except InvalidOperation:
+        return s.strip()
+
+
+def parse_answer_full(
+    raw_gen: str,
+    *,
+    strict_extraction_only: bool = False,
+) -> dict:
+    """Parse model output into prediction + diagnostics (no gold leakage).
+
+    Fallback order matches historical GSM8K eval: after strict phrases and
+    last-line ``= num``, use the **last** bare number in the **full** sanitized
+    generation (not a short tail window), which full finetunes often need.
+    """
+    gen, deg_flags = sanitize_generation(raw_gen)
+    strict = extract_strict_final_number(gen)
+    last_line_eq = extract_last_equals_on_last_line(gen)
+    last_tail_eq = extract_last_equals_in_tail(gen)
+
+    method = "none"
+    pred_raw: str | None = None
+
+    if strict is not None:
+        pred_raw = strict
+        method = "strict_final_phrase"
+    elif last_line_eq is not None:
+        pred_raw = last_line_eq
+        method = "last_line_equals"
+    elif not strict_extraction_only:
+        loose_full = extract_loose_last_number(gen)
+        if loose_full is not None:
+            pred_raw = loose_full
+            method = "loose_full_text_number"
+
+    last_computed = last_tail_eq
+    arith_inconsistent = False
+    if pred_raw is not None and last_computed is not None:
+        arith_inconsistent = not answers_match(pred_raw, last_computed)
+
+    diagnostic = None
+    if pred_raw is not None and last_computed is not None:
+        if arith_inconsistent:
+            diagnostic = "strict_or_final_pred_differs_from_last_equals_in_tail"
+
+    return {
+        "sanitized_generation": gen.strip(),
+        "pred_raw": pred_raw,
+        "pred_display": format_answer_for_report(pred_raw),
+        "method": method,
+        "degeneration_flags": deg_flags,
+        "last_computed_number": format_answer_for_report(last_computed),
+        "arithmetic_inconsistent": arith_inconsistent,
+        "diagnostic": diagnostic,
+    }
+
+
+def classify_error_bucket(
+    correct: bool,
+    parsed: dict,
+    gold: str | None,
+) -> str | None:
+    if correct:
+        return None
+    flags = parsed.get("degeneration_flags") or {}
+    method = parsed.get("method") or "none"
+    if method == "none":
+        if flags.get("absurd_numeric_line_trimmed") or flags.get("repeated_lines_trimmed"):
+            return "truncation_or_looping"
+        return "extraction_none"
+    pred_cmp = parsed.get("pred_raw") or parsed.get("pred_display") or ""
+    if parsed.get("arithmetic_inconsistent") and gold and parsed.get("last_computed_number"):
+        if answers_match(gold, parsed["last_computed_number"]) and not answers_match(gold, pred_cmp):
+            return "final_answer_mismatch_last_computed"
+    if method == "loose_full_text_number":
+        return "loose_number_fallback"
+    return "logic_or_arithmetic"
 
 
 # ──────────────────────────────────────────────
@@ -120,7 +345,16 @@ def build_prompt(question):
 #  Evaluation
 # ──────────────────────────────────────────────
 
-def evaluate(model, tokenizer, test_data, batch_size, max_new_tokens, verbose=False):
+def evaluate(
+    model,
+    tokenizer,
+    test_data,
+    batch_size,
+    max_new_tokens,
+    verbose=False,
+    *,
+    strict_extraction_only: bool = False,
+):
     """Run batched evaluation on GSM8K test set.
 
     How batched generation works:
@@ -187,26 +421,45 @@ def evaluate(model, tokenizer, test_data, batch_size, max_new_tokens, verbose=Fa
                     gen_text = gen_text[:si]
                     break
 
-            gold = normalize(extract_gold(example['answer']))
-            pred = normalize(extract_answer(gen_text))
-            is_correct = gold is not None and pred is not None and gold == pred
+            gold_raw = normalize(extract_gold(example["answer"]))
+            parsed = parse_answer_full(
+                gen_text.strip(),
+                strict_extraction_only=strict_extraction_only,
+            )
+            pred_raw = parsed.get("pred_raw")
+            pred_display = parsed.get("pred_display")
+            gold_display = format_answer_for_report(gold_raw) if gold_raw else None
+            is_correct = answers_match(gold_raw, pred_raw)
 
             if is_correct:
                 correct += 1
             total += 1
 
+            err_bucket = classify_error_bucket(is_correct, parsed, gold_raw)
+
             results.append({
-                'idx': idx,
-                'question': example['question'],
-                'gold': gold,
-                'predicted': pred,
-                'correct': is_correct,
-                'generated': gen_text.strip(),
+                "idx": idx,
+                "question": example["question"],
+                "gold": gold_display,
+                "predicted": pred_display,
+                "correct": is_correct,
+                "generated": gen_text.strip(),
+                "generation_sanitized": parsed.get("sanitized_generation", ""),
+                "extraction_method": parsed.get("method"),
+                "error_bucket": err_bucket,
+                "degeneration_trimmed": any(
+                    (parsed.get("degeneration_flags") or {}).values()
+                ),
+                "degeneration_flags": parsed.get("degeneration_flags"),
+                "arithmetic_inconsistent": parsed.get("arithmetic_inconsistent"),
+                "last_computed_number": parsed.get("last_computed_number"),
+                "diagnostic": parsed.get("diagnostic"),
             })
 
             if verbose:
                 mark = "✓" if is_correct else "✗"
-                log(f"  [{idx:4d}] {mark}  gold={gold}  pred={pred}")
+                log(f"  [{idx:4d}] {mark}  gold={gold_display}  pred={pred_display}  "
+                    f"m={parsed.get('method')}  bucket={err_bucket}")
                 if not is_correct:
                     log(f"         Q: {example['question'][:120]}...")
                     log(f"         Gen: {gen_text.strip()[:200]}...")
@@ -228,13 +481,30 @@ def evaluate(model, tokenizer, test_data, batch_size, max_new_tokens, verbose=Fa
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", required=True)
-    p.add_argument("--output-dir", default="results")
+    p.add_argument(
+        "--output-dir",
+        default=None,
+        help=(
+            "Directory for gsm8k_<model_slug>.json. "
+            "Default: numpy_weights/exploration-finetuning/results (or GSM8K_EVAL_RESULTS_DIR)."
+        ),
+    )
     p.add_argument("--max-samples", type=int, default=None)
     p.add_argument("--max-new-tokens", type=int, default=512)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--verbose", action="store_true",
                    help="Print per-sample results")
+    p.add_argument(
+        "--strict-extraction-only",
+        action="store_true",
+        help=(
+            "Only strict 'The answer is' / 'Final answer:' and last-line '= num'; "
+            "disable full-text last-number fallback (for ablations)."
+        ),
+    )
     args = p.parse_args()
+    output_dir = args.output_dir or default_results_dir()
+    log(f"Results directory: {output_dir}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     log(f"Device: {device}")
@@ -280,9 +550,14 @@ def main():
 
     t_eval = time.time()
     acc, results = evaluate(
-        model, tokenizer, test_data,
-        args.batch_size, args.max_new_tokens,
-        verbose=args.verbose)
+        model,
+        tokenizer,
+        test_data,
+        args.batch_size,
+        args.max_new_tokens,
+        verbose=args.verbose,
+        strict_extraction_only=args.strict_extraction_only,
+    )
     eval_time = time.time() - t_eval
 
     n_correct = sum(1 for r in results if r['correct'])
@@ -292,18 +567,37 @@ def main():
     log(f"  Time:  {eval_time:.1f}s  ({len(results)/eval_time:.1f} samples/s)")
     log(f"{'='*50}\n")
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
     model_short = args.model.replace("/", "_").replace(".", "-")
-    out_path = os.path.join(args.output_dir, f"gsm8k_{model_short}.json")
+    out_path = os.path.join(output_dir, f"gsm8k_{model_short}.json")
+
+    method_ct = Counter(r.get("extraction_method") or "unknown" for r in results)
+    err_ct = Counter(
+        (r.get("error_bucket") or "ok") for r in results if not r["correct"]
+    )
+    trimmed_n = sum(1 for r in results if r.get("degeneration_trimmed"))
+    inconsistent_n = sum(1 for r in results if r.get("arithmetic_inconsistent"))
 
     output = {
         "model": args.model,
         "benchmark": "gsm8k",
         "setting": "8-shot CoT, greedy",
+        "scoring_notes": (
+            "Sanitize degenerate tails; then last strict 'The answer is' / 'Final answer:'; "
+            "else last-line '= num'; else last bare number in full sanitized text (legacy GSM8K "
+            "fallback, needed for long full-finetune CoT). Decimal equality. "
+            "Use --strict-extraction-only to disable the full-text fallback."
+        ),
+        "strict_extraction_only": bool(args.strict_extraction_only),
+        "loose_fallback": "disabled" if args.strict_extraction_only else "full_sanitized_text",
         "accuracy": round(acc, 4),
         "correct": n_correct,
         "total": len(results),
         "eval_time_s": round(eval_time, 1),
+        "extraction_method_counts": dict(method_ct),
+        "incorrect_error_bucket_counts": dict(err_ct),
+        "degeneration_trimmed_count": trimmed_n,
+        "arithmetic_inconsistent_count": inconsistent_n,
         "samples": results,
     }
     with open(out_path, "w") as f:

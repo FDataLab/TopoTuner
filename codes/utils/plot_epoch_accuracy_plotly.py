@@ -1,14 +1,17 @@
 """
 Generate Plotly epoch-accuracy plots for all freezing plans.
 Epoch 0 = baseline (pre-training) accuracy.
+Also generates Qwen plot: Full, LoRA, + 4 freeze experiments with reference lines.
 """
 
 import json
+import os
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-RESULTS_DIR = "epoch_accuracy_results"
+BASE = "/home/kadir/topo/numpy_weights/exploration-finetuning"
+RESULTS_DIR = os.path.join(BASE, "eval", "llama", "epoch_accuracy", "epoch_accuracy_results")
 BASELINE_ACC = 0.5618  # 56.2% baseline Llama 3.1 8B on GSM8K
 FULL_FT_ACC = 0.6444   # 64.4% full finetuning (no freezing)
 LORA_ACC = 0.5982       # 59.8% LoRA finetuning
@@ -110,10 +113,85 @@ fig_combined.update_layout(
     width=1000, height=600,
 )
 
-fig_combined.write_html(f"{RESULTS_DIR}/epoch_accuracy_combined.html")
-print(f"Saved: {RESULTS_DIR}/epoch_accuracy_combined.html")
+out_combined = os.path.join(BASE, "eval", "llama", "plots", "epoch_accuracy_combined.html")
+os.makedirs(os.path.dirname(out_combined), exist_ok=True)
+fig_combined.write_html(out_combined)
+print(f"Saved: {out_combined}")
 
 
+# ── Qwen: Full, LoRA, + 4 freeze experiments ─────────────────────────────
 
+QWEN_GSM8K = os.path.join(BASE, "eval", "qwen", "gsm8k", "eval-qwen-gsm8k")
+QWEN_EPOCH = os.path.join(BASE, "eval", "qwen", "epoch_accuracy", "eval-qwen-epoch-accuracy")
+
+QWEN_CONFIG = [
+    ("Qwen-Full_epoch_accuracy.json", "Full", "#9467bd"),
+    ("Qwen-LoRA_epoch_accuracy.json", "LoRA", "#8c564b"),
+    ("norm-low6_epoch_accuracy.json", "norm-low6", "#1f77b4"),
+    ("norm-high6_epoch_accuracy.json", "norm-high6", "#1f6fb2"),
+    ("wass-low6_epoch_accuracy.json", "wass-low6", "#d62728"),
+    ("wass-high6_epoch_accuracy.json", "wass-high6", "#c0392b"),
+]
+
+
+def load_qwen_json(path):
+    if not os.path.exists(path):
+        return None, None
+    with open(path) as f:
+        data = json.load(f)
+    epochs = sorted(int(k) for k in data.keys())
+    means = [np.mean(data[str(e)]) * 100 for e in epochs]
+    return epochs, means
+
+
+fig_qwen = go.Figure()
+
+full_final, lora_final = None, None
+for fname, label, color in QWEN_CONFIG:
+    if "Full" in fname:
+        path = os.path.join(QWEN_GSM8K, fname)
+    elif "LoRA" in fname:
+        path = os.path.join(QWEN_GSM8K, fname)
+    else:
+        path = os.path.join(QWEN_EPOCH, fname)
+    epochs, means = load_qwen_json(path)
+    if not epochs:
+        continue
+    fig_qwen.add_trace(go.Scatter(
+        x=epochs, y=means,
+        mode='lines+markers',
+        name=label,
+        line=dict(color=color, width=2.5),
+        marker=dict(size=8),
+        hovertemplate="Epoch %{x}<br>Accuracy: %{y:.1f}%<extra>" + label + "</extra>",
+    ))
+    if "Full" in label:
+        full_final = means[-1] if means else None
+    elif "LoRA" in label:
+        lora_final = means[-1] if means else None
+
+if full_final is not None:
+    fig_qwen.add_hline(y=full_final, line_dash="dash", line_color="#9467bd", line_width=2,
+                       annotation_text=f"Full FT final: {full_final:.1f}%",
+                       annotation_position="top right",
+                       annotation_font=dict(size=11, color="#9467bd"))
+if lora_final is not None:
+    fig_qwen.add_hline(y=lora_final, line_dash="dot", line_color="#8c564b", line_width=2,
+                       annotation_text=f"LoRA final: {lora_final:.1f}%",
+                       annotation_position="bottom right",
+                       annotation_font=dict(size=11, color="#8c564b"))
+
+fig_qwen.update_layout(
+    title=dict(text="Qwen GSM8K Epoch Accuracy — Full, LoRA, Freeze Experiments", font=dict(size=18)),
+    xaxis=dict(title="Epoch", dtick=1, tickfont=dict(size=16), title_font=dict(size=16)),
+    yaxis=dict(title="GSM8K Accuracy (%)", tickfont=dict(size=16), title_font=dict(size=16)),
+    legend=dict(x=0.01, y=0.99, bgcolor="rgba(255,255,255,0.8)"),
+    template="plotly_white",
+    width=1000, height=600,
+)
+
+out_qwen = os.path.join(QWEN_GSM8K, "epoch_accuracy_qwen_combined.html")
+fig_qwen.write_html(out_qwen)
+print(f"Saved: {out_qwen}")
 
 print("\nDone!")

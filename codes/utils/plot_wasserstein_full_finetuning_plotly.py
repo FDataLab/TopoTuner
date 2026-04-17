@@ -35,6 +35,27 @@ def main():
 
     projections = ["k", "q", "v", "o"]
     epochs = ["epoch_1", "epoch_2", "epoch_3", "epoch_4", "epoch_5", "epoch_6"]
+
+    # Verification: ensure epochs 1–6 are present and have correct layer counts
+    csv_epochs = sorted(df["Epoch"].unique())
+    n_layers_exp = df.groupby(["Epoch", "Projection"])["Layer"].nunique()
+    print("Verification (epoch → layer count per projection):")
+    print(f"  Epochs in CSV: {csv_epochs}")
+    all_ok = True
+    for ep in epochs:
+        if ep not in csv_epochs:
+            print(f"  {ep}: MISSING from CSV")
+            all_ok = False
+        else:
+            layers_per_proj = [n_layers_exp.get((ep, p), 0) for p in projections]
+            if len(set(layers_per_proj)) != 1 or layers_per_proj[0] == 0:
+                print(f"  {ep}: inconsistent {layers_per_proj}")
+                all_ok = False
+            else:
+                print(f"  {ep}: {layers_per_proj[0]} layers × 4 proj = {layers_per_proj[0] * 4} rows ✓")
+    if all_ok and set(epochs) <= set(csv_epochs):
+        print("  OK: All epochs 1-6 present with full layer coverage")
+    print()
     colors = [
         "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
         "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",

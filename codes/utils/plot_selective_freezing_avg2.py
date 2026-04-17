@@ -11,6 +11,11 @@ import os
 import numpy as np
 import plotly.graph_objects as go
 
+BASE = "/home/kadir/topo/numpy_weights/exploration-finetuning"
+DEFAULT_RUN1 = os.path.join(BASE, "eval", "qwen", "selective-freezing", "eval-selective-freezing")
+DEFAULT_RUN2 = os.path.join(BASE, "eval", "qwen", "selective-freezing", "run2")
+DEFAULT_OUTPUT = os.path.join(BASE, "eval", "qwen", "plots", "epoch_accuracy_freeze_avg2.html")
+
 BASELINE_ACC = 0.5618
 FULL_FT_ACC = 0.6444
 LORA_ACC = 0.5982
@@ -55,18 +60,17 @@ def load_avg_two_runs(run1_dir, run2_dir, name):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--run1-dir", default="eval-selective-freezing",
+    parser.add_argument("--run1-dir", default=DEFAULT_RUN1,
                         help="Run1 eval directory")
-    parser.add_argument("--run2-dir", default="eval-selective-freezing-run2",
+    parser.add_argument("--run2-dir", default=DEFAULT_RUN2,
                         help="Run2 eval directory")
     parser.add_argument("--output", default=None,
-                        help="Output HTML (default: eval-selective-freezing/epoch_accuracy_freeze_avg2.html)")
+                        help="Output HTML (default: eval/qwen/plots/epoch_accuracy_freeze_avg2.html)")
     args = parser.parse_args()
 
-    base = os.path.dirname(os.path.abspath(__file__))
-    run1 = args.run1_dir if os.path.isabs(args.run1_dir) else os.path.join(base, args.run1_dir)
-    run2 = args.run2_dir if os.path.isabs(args.run2_dir) else os.path.join(base, args.run2_dir)
-    out_path = args.output or os.path.join(base, "eval-selective-freezing", "epoch_accuracy_freeze.html")
+    run1 = args.run1_dir if os.path.isabs(args.run1_dir) else os.path.join(BASE, args.run1_dir)
+    run2 = args.run2_dir if os.path.isabs(args.run2_dir) else os.path.join(BASE, args.run2_dir)
+    out_path = args.output or DEFAULT_OUTPUT
 
     fig = go.Figure()
 

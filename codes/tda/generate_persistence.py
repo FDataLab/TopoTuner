@@ -96,6 +96,13 @@ if __name__ == "__main__":
                         help="Subsample matrices with more rows than this (e.g. 1024). Keeps persistence tractable for large matrices.")
     parser.add_argument("--maxdim", type=int, default=1,
                         help="Max homology dimension for ripser (0=H0 only, 1=H0+H1). Default: 1")
+    parser.add_argument(
+        "--projections",
+        type=str,
+        default="q,k,v,o",
+        help="Direct mode only: comma-separated projection suffixes to load (*.npy with _{proj}.npy). "
+        "Example: --projections v,o to skip q and k.",
+    )
     args = parser.parse_args()
 
     if args.max_rows:
@@ -109,10 +116,14 @@ if __name__ == "__main__":
         if not args.output_dir:
             parser.error("--output-dir is required when using --input-dir")
 
-        def full_filter(f): return f.endswith(".npy") and any(f"_{k}.npy" in f for k in ["k", "q", "v", "o"])
-        def baseline_filter(f): return f.endswith(".npy") and any(f"_{k}.npy" in f for k in ["k", "q", "v", "o"])
+        projs = [p.strip() for p in args.projections.split(",") if p.strip()]
+        if not projs:
+            parser.error("--projections must list at least one of q,k,v,o")
 
-        filt = full_filter if args.filter in ("full", "baseline") else full_filter
+        def npy_filter(f: str) -> bool:
+            return f.endswith(".npy") and any(f"_{k}.npy" in f for k in projs)
+
+        filt = npy_filter
         if not os.path.exists(args.input_dir):
             print(f"⚠️ Input dir not found: {args.input_dir}")
         else:

@@ -10,7 +10,7 @@ def load_pkl(path):
     with open(path, "rb") as f:
         return pickle.load(f)
 
-def compute_direct_comparisons(pairs, label):
+def compute_direct_comparisons(pairs, label, h0_only: bool = False):
     results = []
     for file1, file2 in tqdm(pairs, desc=f"{label}"):
         try:
@@ -18,20 +18,31 @@ def compute_direct_comparisons(pairs, label):
             dgm2 = load_pkl(file2)
 
             h0 = wasserstein_distance(dgm1[0], dgm2[0])
-            h1 = wasserstein_distance(dgm1[1], dgm2[1]) if len(dgm1) > 1 and len(dgm2) > 1 else None
             row = {
                 "Type": label,
                 "File": os.path.basename(file1),
                 "Wasserstein H0": h0,
             }
-            if h1 is not None:
-                row["Wasserstein H1"] = h1
+            if not h0_only:
+                h1 = (
+                    wasserstein_distance(dgm1[1], dgm2[1])
+                    if len(dgm1) > 1 and len(dgm2) > 1
+                    else None
+                )
+                if h1 is not None:
+                    row["Wasserstein H1"] = h1
             results.append(row)
         except Exception as e:
             print(f"❌ Skipping {file1} vs {file2}: {e}")
     return results
 
-def compute_baseline_vs_epochs(baseline_dir, epoch_dirs, output_csv, projections=None):
+def compute_baseline_vs_epochs(
+    baseline_dir,
+    epoch_dirs,
+    output_csv,
+    projections=None,
+    h0_only: bool = False,
+):
     """Compare baseline persistence diagrams against each epoch's diagrams.
 
     Args:
@@ -39,6 +50,7 @@ def compute_baseline_vs_epochs(baseline_dir, epoch_dirs, output_csv, projections
         epoch_dirs: list of (epoch_label, path_to_SavedDiagrams)
         output_csv: where to write results
         projections: list of projection suffixes to compare, e.g. ["q", "k", "v", "o"]
+        h0_only: if True, only Wasserstein H0 is computed and stored (no H1 column).
     """
     if projections is None:
         projections = ["q", "k", "v", "o"]
@@ -57,7 +69,9 @@ def compute_baseline_vs_epochs(baseline_dir, epoch_dirs, output_csv, projections
             if not pairs:
                 print(f"  ⚠️ No matching {proj} files for {epoch_label}")
                 continue
-            results = compute_direct_comparisons(pairs, f"Baseline vs {epoch_label} ({proj})")
+            results = compute_direct_comparisons(
+                pairs, f"Baseline vs {epoch_label} ({proj})", h0_only=h0_only
+            )
             for r in results:
                 r["Epoch"] = epoch_label
                 r["Projection"] = proj
@@ -81,6 +95,11 @@ if __name__ == "__main__":
     parser.add_argument("--output", default=None, help="Output CSV path")
     parser.add_argument("--projections", default="q,k,v,o",
                         help="Comma-separated projection types (default: q,k,v,o)")
+    parser.add_argument(
+        "--h0-only",
+        action="store_true",
+        help="Only compute Wasserstein H0 (omit H1 from CSV).",
+    )
     args = parser.parse_args()
 
     # Direct path mode
@@ -92,7 +111,13 @@ if __name__ == "__main__":
             label, path = entry.split(":", 1)
             epoch_dirs.append((label, path))
         projections = [p.strip() for p in args.projections.split(",")]
-        compute_baseline_vs_epochs(args.baseline_dir, epoch_dirs, args.output, projections)
+        compute_baseline_vs_epochs(
+            args.baseline_dir,
+            epoch_dirs,
+            args.output,
+            projections,
+            h0_only=args.h0_only,
+        )
         exit(0)
 
     # Legacy mode (original hardcoded paths)

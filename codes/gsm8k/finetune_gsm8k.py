@@ -30,6 +30,7 @@ from transformers import (
     Trainer,
     TrainerCallback,
     TrainingArguments,
+    set_seed,
 )
 
 
@@ -112,29 +113,6 @@ def collate_fn(batch):
 # ──────────────────────────────────────────────────────────────────────
 #  Metrics Callback — Records training dynamics per step
 # ──────────────────────────────────────────────────────────────────────
-
-class ParamSnapshotCallback(TrainerCallback):
-    def __init__(self, out_dir, keys=("q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj")):
-        self.out_dir = out_dir
-        self.keys = keys
-
-    def on_epoch_end(self, args, state, control, model=None, **kwargs):
-        if model is None:
-            return
-
-        m = model.module if hasattr(model, "module") else model
-
-        snap = {}
-        for name, p in m.named_parameters():
-            if any(k in name for k in self.keys):
-                snap[name] = p.detach().float().cpu()  # float for stable diffing
-
-        epoch_str = f"{state.epoch:.2f}" if state.epoch is not None else "NA"
-        path = os.path.join(self.out_dir, f"param_snapshot_epoch{epoch_str}_step{state.global_step}.pt")
-        torch.save(snap, path)
-        print(f"  Saved param snapshot: {path}", flush=True)
-
-
 
 class MetricsCallback(TrainerCallback):
     """Records key training metrics at each logging step.
@@ -289,7 +267,11 @@ def main():
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--logging-steps", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="RNG seed for Trainer, data shuffling, and torch/numpy (default 42).")
     args = parser.parse_args()
+
+    set_seed(args.seed)
 
     # Defaults
     if args.lr is None:
@@ -320,6 +302,7 @@ def main():
         print(f"  LoRA dropout:    0.05", flush=True)
         print(f"  LoRA targets:    q_proj, k_proj, v_proj, o_proj", flush=True)
     print(f"  Output dir:      {args.output_dir}", flush=True)
+    print(f"  Seed:            {args.seed}", flush=True)
     print(f"{'='*60}\n", flush=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -420,19 +403,18 @@ def main():
         dataloader_num_workers=2,
         remove_unused_columns=False,
         include_num_input_tokens_seen=True,
+        seed=args.seed,
+        data_seed=args.seed,
     )
 
     metrics_cb = MetricsCallback()
-
-    param_cb = ParamSnapshotCallback(args.output_dir)
-
 
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         data_collator=collate_fn,
-        callbacks=[metrics_cb, param_cb],
+        callbacks=[metrics_cb],
     )
 
     print(f"\n  Training...", flush=True)
@@ -476,6 +458,7 @@ def main():
             "weight_decay": 0.01,
             "max_grad_norm": 1.0,
             "precision": "bf16",
+            "seed": args.seed,
         },
         "lora_config": {
             "r": args.lora_r,

@@ -130,9 +130,29 @@ def evaluate_model(model, tokenizer, test_data, batch_size, max_new_tokens):
 def find_checkpoints(plan, runs, base_dir="."):
     """Find all epoch checkpoint paths for a plan across runs.
 
+    Supports both legacy layout (gsm8k-frozen-planA, gsm8k-frozen-planA-run2)
+    and new layout (checkpoints/llama/plans/plan-a/run1, run2).
+
     Returns dict: {run_idx: [(epoch, checkpoint_path), ...]}
     """
     result = {}
+    plan_lower = plan.lower()
+    new_plan_dir = os.path.join(base_dir, "checkpoints", "llama", "plans", f"plan-{plan_lower}")
+
+    # Try new structure first (checkpoints/llama/plans/plan-a/run1, run2, ...)
+    if os.path.isdir(new_plan_dir):
+        subdirs = sorted(os.listdir(new_plan_dir))
+        for idx, subdir in enumerate(subdirs, start=1):
+            run_path = os.path.join(new_plan_dir, subdir)
+            if not os.path.isdir(run_path):
+                continue
+            checkpoints = _discover_epoch_checkpoints(run_path)
+            if checkpoints:
+                result[idx] = checkpoints
+        if result:
+            return result
+
+    # Fallback: legacy layout
     for run in range(1, runs + 1):
         if run == 1:
             run_dir = os.path.join(base_dir, f"gsm8k-frozen-plan{plan}")
@@ -190,14 +210,20 @@ def main():
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--max-samples", type=int, default=None)
-    parser.add_argument("--output-dir", type=str, default="epoch_accuracy_results")
-    parser.add_argument("--base-dir", type=str, default=".")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Output dir (default: eval/llama/epoch_accuracy/epoch_accuracy_results)")
+    parser.add_argument("--base-dir", type=str, default="/home/kadir/topo/numpy_weights/exploration-finetuning",
+                        help="Base directory for checkpoints")
     parser.add_argument("--base-model", type=str, default="meta-llama/Llama-3.1-8B",
                         help="Base model for tokenizer (checkpoints don't save tokenizer)")
     parser.add_argument("--custom-dirs", nargs="+", default=None,
                         help="Custom run directories (overrides --plans). Format: label:dir1,dir2,...")
     args = parser.parse_args()
 
+    if args.output_dir is None:
+        args.output_dir = os.path.join(
+            args.base_dir, "eval", "llama", "epoch_accuracy", "epoch_accuracy_results"
+        )
     os.makedirs(args.output_dir, exist_ok=True)
 
     print("Loading tokenizer from base model...", flush=True)
@@ -245,8 +271,18 @@ def main():
                 print(f"    Epoch {epoch}: {ckpt_path}", flush=True)
 
                 t0 = time.time()
-                model = AutoModelForCausalLM.from_pretrained(
-                    ckpt_path, torch_dtype=torch.bfloat16, device_map="auto")
+                adapter_config = os.path.join(ckpt_path, "adapter_config.json")
+                if os.path.exists(adapter_config):
+                    from peft import PeftModel
+                    with open(adapter_config) as f:
+                        cfg = json.load(f)
+                    base_id = cfg.get("base_model_name_or_path", args.base_model)
+                    base = AutoModelForCausalLM.from_pretrained(
+                        base_id, torch_dtype=torch.bfloat16, device_map="auto")
+                    model = PeftModel.from_pretrained(base, ckpt_path)
+                else:
+                    model = AutoModelForCausalLM.from_pretrained(
+                        ckpt_path, torch_dtype=torch.bfloat16, device_map="auto")
                 model.eval()
 
                 acc, correct, total = evaluate_model(
