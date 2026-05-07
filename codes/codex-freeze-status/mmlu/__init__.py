@@ -1,2 +1,0 @@
-# MMLU evaluation package
-

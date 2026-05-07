@@ -1,9 +1,0 @@
-bert_score==0.3.13
-datasets==3.4.1
-evaluate==0.4.3
-numpy==2.2.5
-peft==0.15.0
-torch==2.6.0
-transformers==4.50.1
-trl==0.16.1
-wandb==0.19.8
