@@ -27,7 +27,7 @@ def parse_args():
         default=[],
         help="List of transformer layer indices to freeze (e.g., --freeze-layers 7 11)"
     )
-    # ===== PROFESSOR'S VERSION (ACTIVE) =====
+
     parser.add_argument("--freeze-q-layers", nargs="*", type=int, default=[], help="Freeze ONLY q_proj in these layer idxs")
     parser.add_argument("--freeze-k-layers", nargs="*", type=int, default=[], help="Freeze ONLY k_proj in these layer idxs")
     parser.add_argument("--freeze-v-layers", nargs="*", type=int, default=[], help="Freeze ONLY v_proj in these layer idxs")
@@ -51,12 +51,6 @@ def parse_args():
         default=[],
         help="Layer indices whose MLP blocks (gate_proj, up_proj, down_proj) should be frozen"
     )
-    
-    # ===== KADIR'S VERSION (COMMENTED OUT - PRESERVED FOR REFERENCE) =====
-    # parser.add_argument("--freeze-q-layers", nargs="*", type=int, default=[], help="Freeze q_proj + o_proj in these layer idxs (optionally + MLP if --freeze-mlp)")
-    # parser.add_argument("--freeze-k-layers", nargs="*", type=int, default=[], help="Freeze k_proj + o_proj in these layer idxs (optionally + MLP if --freeze-mlp)")
-    # parser.add_argument("--freeze-v-layers", nargs="*", type=int, default=[], help="Freeze v_proj + o_proj in these layer idxs (optionally + MLP if --freeze-mlp)")
-    # parser.add_argument("--freeze-mlp", action="store_true", help="Also freeze MLP (gate_proj, up_proj, down_proj) along with projections when using --freeze-q/k/v-layers")
 
     parser.add_argument(
         "--hotpot-evidence",
